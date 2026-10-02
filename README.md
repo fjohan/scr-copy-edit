@@ -30,7 +30,7 @@ Requires PDO MySQL. Use a database account scoped to this database. With Apache,
 
 ## Prototype boundaries
 
-Replay reconstructs document text and displays event/cursor information; it does not reproduce the entire browser interface or scroll motion. Playback currently advances one event every 130 ms rather than following original timing. Selection and scroll events are coalesced, so this is a semantic process log, not a screen recording or raw pointer trace. Edits overlapping an annotation detach its highlight but retain its comment. The editor is plain text, not a rich-text Notion implementation.
+Replay reconstructs document text with a visible caret and highlighted selection, follows the active selection end within the replay panel, and displays event/cursor information; it does not reproduce the entire browser interface or scroll motion. Playback currently advances one event every 130 ms rather than following original timing. Selection and scroll events are coalesced, so this is a semantic process log, not a screen recording or raw pointer trace. Edits overlapping an annotation detach its highlight but retain its comment. The editor is plain text, not a rich-text Notion implementation.
 
 The browser stores the complete workspace, and the server receives complete workspace snapshots with deduplicated event inserts. This is suitable for a small prototype, not long research sessions: Incremental event batches, acknowledgements/retries, and a storage quota strategy should precede production collection. Local storage now uses separate IndexedDB records (see save behavior below). Closing a tab before a pending server sync may leave its last events only in browser storage. MySQL sessions are scoped to a PHP session cookie; authentication, cross-device accounts, concurrent editing, and conflict resolution are not included. Local state takes precedence if present.
 
@@ -61,9 +61,11 @@ node tests/app-integration.test.cjs
 
 Open **Writing score** to paste a linear representation, preview the reconstructed text, and create a separate test document. Imports include a final checkpoint for word analysis and a log for replay. Existing documents are never overwritten. **Load example** loads the supplied example; its exact final text includes two trailing newlines. The optional expected-text field compares the complete string, including whitespace, before import.
 
-For automatic test data, enter a target in **Expected final text / generator target**, choose a seed and an edit-pass count, then click **Generate score**. The same target, seed, and count produce the same score. Generation types the target with per-character delays, introduces/corrects suffix errors, copies temporary passages, and moves original words out and back. By default, these operations are expressed using only pauses, literal typing, `<DEL>`, `<ENTER>`, and `<CLICK…>` for compatibility with basic renderers. **Use extended notation** preserves explicit selections and clipboard operations. Each generated score is parsed again to verify that it reconstructs the target exactly. Targets are limited to 5,000 UTF-16 units and edit passes to 50.
+For automatic test data, enter a target in **Expected final text / generator target**, choose a seed and an edit-pass count, then click **Generate score**. The same target, seed, and count produce the same score. Generation types the target with per-character delays, introduces/corrects suffix errors, copies temporary passages, and moves original words out and back. **Generate faithful notation** is checked by default in the UI and preserves selections and clipboard actions. Uncheck it for basic compatibility with other renderers. Each generated score is parsed again to verify its final text. Targets are limited to 5,000 UTF-16 units and edit passes to 50.
 
-Basic notation (default generation/export) uses pauses, literal typing, DEL, CLICK, and ENTER. The selection, clipboard, forward-delete, tab, and bracket directives below are optional Margin extensions and require a renderer that supports them. **Make portable** converts an existing extended score into basic notation without changing its final text or overall pause duration.
+**Faithful actions** is the default document export format. Typing advances the simulated caret, backspace moves it backward, and replacing a selection collapses it after the insertion. These effects do not produce extra cursor actions. Recorded keyboard navigation retains its key and modifiers; recorded pointer actions retain click/tap provenance. A resolved target after `@` preserves the observed position without pretending that a keypress was a click. New logs capture navigation outcomes after the browser handles keyboard and pointer events, including repeated navigation keys. Older logs can sometimes identify keys from editor keyup events; otherwise MOVE/SELECT preserve recorded positions with an explicit unknown-cause warning. An edit whose cursor context is missing is represented as PATCH, not preceded by an invented click. Browser/OS behavior and recording gaps still limit action recovery from older logs.
+
+**Basic compatibility** and **Make portable** are explicit alternatives for simple renderers that understand only pauses, literal typing, DEL, CLICK, and ENTER. They preserve final text and timing but may synthesize positioning clicks, expand selections into deletions, and lose clipboard/navigation provenance. They should not be interpreted as faithful action transcripts.
 
 Syntax:
 
@@ -72,7 +74,17 @@ Syntax:
 | `<2.329>` | Advance the simulated clock by 2.329 seconds |
 | `Hello` | Insert a run of characters at the cursor, replacing any selection |
 | `<DEL>` / `<DEL3>` | Backspace one / three UTF-16 units; a selected range is deleted as a whole |
-| `<CLICK31>` | Collapse the cursor to zero-based UTF-16 offset 31 |
+| `<CLICK31>` / `<TAP31>` | Recorded click / tap at zero-based UTF-16 offset 31 |
+| `<CLICK2:8:B>` / `<TAP2:8>` | Pointer selection; B marks a backward active end |
+| `<LEFT>` / `<RIGHT>` | Move one Unicode code point or collapse a selection |
+| `<UP>` / `<DOWN>` | Move between logical newline-separated lines at the current column |
+| `<HOME>` / `<END>` | Move to the logical line start / end |
+| `<SHIFT+LEFT>` | Extend the selection one code point to the left |
+| `<CTRL+HOME>` / `<CTRL+END>` | Move to document start / end (SHIFT can extend) |
+| `<UP@12:12>` / `<SHIFT+LEFT@2:8:B>` | Recorded key and resolved range; preserves actual browser wrapping/navigation |
+| `<CTRL+ALL>` | Select all text |
+| `<PAGEUP@0:0>` / `<PAGEDOWN@31:31>` | Page navigation with its recorded destination |
+| `<MOVE31>` / `<SELECT2:8:B>` | Recorded position/selection whose action cause is unknown |
 | `<ENTER>` / `<TAB>` | Insert newline / tab |
 | `<SELECT2:8>` | Select the half-open range from 2 to 8 |
 | `<FWD>` / `<FWD3>` | Delete forward one / three units |
@@ -81,23 +93,23 @@ Syntax:
 | `<PASTE>` | Paste the simulated clipboard |
 | `<LT>` / `<GT>` | Type a literal angle bracket |
 
-Unicode characters are typed as whole code points. Cursor/delete operations that split surrogate pairs are rejected. Out-of-range cursor positions and malformed directives are errors; overlong backspaces clamp to the text boundary with a warning. Unknown tokens are preserved as log markers and reported as having no simulated effect.
+Authored UP/DOWN/HOME/END use logical lines, not browser visual wrapping. Recorded navigation includes its resolved range after @; modified word navigation and page navigation require resolved targets because their behavior depends on platform/layout. Unicode characters are typed as whole code points. Cursor/delete operations that split surrogate pairs are rejected. Out-of-range cursor positions and malformed directives are errors; overlong backspaces clamp to the text boundary with a warning. Unknown tokens are preserved as log markers and reported as having no simulated effect.
 
 Typed characters produce synthetic `before_input` and `text_change` events with the same event structure used by the editor; cursor and clipboard actions produce corresponding semantic events. No physical keyboard, focus, or scroll activity is invented. All synthetic events are explicitly marked. A plain run such as `Hello` supplies no timing between its letters: word analysis marks intervals inside that run as unknown, rather than assuming zero. Explicit pauses between runs are measured, and the initial score delay is available as the first word's before-pause. Rich-log clocks use millisecond resolution; finer pause values are rounded with a warning while the original score tokens remain intact. Imported simulated sessions end at import time so subsequent real writing belongs to a new session.
 
-**Load its score** / **Download score** export the active document. The default basic export reconstructs text, cursor movements, and edit timing. Selected replacements become `<CLICKend><DELcount>` followed by literal text; cuts and copies become explicit deletes and literal insertions. No SELECT, COPY, CUT, PASTE, PATCH, BASE, CLIP, or RICH tokens appear in basic output. Clipboard provenance, selection ranges, bulk input types, and snapshot origins require extended notation or the archive. Basic output cannot safely encode literal angle brackets, and refuses those cases rather than emitting unsupported escapes. **Use extended notation** enables the richer compact export. Encoded extensions preserve operations that do not fit basic shorthand: `BASE` stores an existing-text snapshot; `PATCH` stores a replacement/bulk input with its input type; `CLIP` captures a clipboard source without applying the later deletion twice; `TEXT` and `PASTE` can carry arbitrary text. Payloads are base64url-encoded UTF-8 JSON. In extended mode, original imported score tokens roundtrip exactly, including unsupported tokens and trailing pauses; exporting ordinary logs gives an equivalent score, not the original physical key stream. Compact export reports omitted non-text metadata and snapshots needed for unrecorded changes.
+**Load its score** / **Download score** export the active document in the selected format. Faithful export validates that the score reconstructs the final text. Encoded operations handle edits outside ordinary typing: `BASE` stores an existing-text snapshot; `PATCH` stores a replacement/bulk/undo input with its input type and exact range; `CLIP` captures a clipboard source; `TEXT`, `CUT`, and `PASTE` carry arbitrary data. Payloads are base64url-encoded UTF-8 JSON. Original imported score tokens roundtrip exactly, including unsupported tokens and trailing pauses. Non-text interface events and full metadata remain in the rich log/archive. Basic compatibility cannot safely encode literal angle brackets and refuses those cases.
 
-Select **Include lossless log archive** to use extended notation and append a `RICH` extension containing the entire document. Parsing this preserves event details, identities, timestamps, comments, revisions, and metadata exactly, and verifies that the visible score reconstructs the archive's final text. Creating a document from an archive deliberately forks it: document, event, session, and revision IDs are remapped to prevent collisions; original identities remain as metadata. The UI appends a final checkpoint to the new copy. This archive can be much larger than the compact score. All score inputs are capped at 2 million characters and 100,000 simulated events.
+Select **Include lossless log archive** to use faithful notation and append a `RICH` extension containing the entire document. Parsing this preserves event details, identities, timestamps, comments, revisions, and metadata exactly, and verifies that the visible score reconstructs the archive's final text. Creating a document from an archive deliberately forks it: document, event, session, and revision IDs are remapped to prevent collisions; original identities remain as metadata. The UI appends a final checkpoint to the new copy. This archive can be much larger than the compact score. All score inputs are capped at 2 million characters and 100,000 simulated events.
 
 The codec and generator are also available without the UI:
 
 ```js
 const score = require('./assets/writing-score.js');
-const generated = score.generate('A final draft.', { seed: 'study-1', edits: 5 });
+const generated = score.generate('A final draft.', { seed: 'study-1', edits: 5, extended: true });
 const session = score.parse(generated.score);
 // session.text, session.events, session.elapsedMs, session.warnings
-const basic = score.exportScore(document);
-const compact = score.exportScore(document, { extended: true });
+const compact = score.exportScore(document); // faithful actions
+const basic = score.exportScore(document, { portable: true });
 const portable = score.toPortable(existingExtendedScore);
 const archive = score.exportScore(document, { lossless: true });
 ```
@@ -106,6 +118,7 @@ Additional validation includes the supplied example, compact and lossless roundt
 
 ```sh
 node tests/writing-score.test.cjs
+node tests/faithful-score.test.cjs
 node tests/app-integration.test.cjs
 ```
 

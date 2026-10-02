@@ -13,7 +13,7 @@ test('Editor events, checkpoint capture, analysis tab, and JSON export work toge
  const saved=new Map();let downloaded=null;
  const context={pendingTimers:new Map(),console,crypto:require('node:crypto').webcrypto,performance,structuredClone,innerWidth:390,innerHeight:844,navigator:{userAgent:'test'},setTimeout(fn,ms){context.pendingTimers.set(ms,fn);return ms;},clearTimeout(ms){context.pendingTimers.delete(ms);},setInterval:()=>1,clearInterval(){},TextEncoder,TextDecoder,btoa,atob,AbortController,Blob,URL:{createObjectURL(blob){downloaded=blob;return 'blob:test';},revokeObjectURL(){}},localStorage:{getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)},fetch:async()=>({ok:false}),window:{addEventListener(){}},document:{getElementById:get,querySelectorAll:()=>[],querySelector:()=>new Element(''),addEventListener(){},execCommand(){},createElement:()=>({click(){}})}};
  vm.createContext(context);
- for(const file of ['text-edits.js','word-analysis.js','word-heatmap.js','writing-score.js','document-library.js','workspace-storage.js','app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets',file),'utf8'),context);
+ for(const file of ['text-edits.js','word-analysis.js','word-heatmap.js','writing-score.js','document-library.js','workspace-storage.js','replay.js','app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets',file),'utf8'),context);
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(get('editor').spellcheck,'false');
  assert.equal(get('editor').autocorrect,'on');
@@ -38,6 +38,24 @@ test('Editor events, checkpoint capture, analysis tab, and JSON export work toge
  if(!$('analysis-warning').textContent.includes('Save a checkpoint'))throw Error('Missing empty state');
  setView('write');
  for(const letter of 'cat '){const editor=$('editor');editor.selectionStart=editor.selectionEnd=editor.value.length;editor.listeners.beforeinput({target:editor,inputType:'insertText',data:letter,isComposing:false});editor.value+=letter;editor.listeners.input({target:editor,inputType:'insertText'});}
+ replayAt(doc().events.length-1);if(!$('replay-text').innerHTML.includes('replay-caret'))throw Error('Typing caret missing in replay');
+ $('editor').setSelectionRange(0,3);captureSelection();replayAt(doc().events.length-1);
+ if(!$('replay-text').innerHTML.includes('<mark class="replay-selection">cat</mark>')||!$('replay-detail').textContent.includes('selection 0–3'))throw Error('Replay selection missing');
+ const replayEditor=$('editor');
+ replayEditor.listeners.keydown({key:'ArrowLeft',target:replayEditor,shiftKey:true,ctrlKey:false,metaKey:false,altKey:false,repeat:false,defaultPrevented:false});
+ replayEditor.setSelectionRange(0,2);pendingTimers.get(0)();
+ if(doc().events.at(-1).type!=='navigation'||doc().events.at(-1).data.key!=='ArrowLeft')throw Error('Keyboard navigation provenance missing');
+ replayEditor.listeners.pointerdown({target:replayEditor,pointerId:1,clientX:10,clientY:10});
+ replayEditor.listeners.pointerup({target:replayEditor,pointerId:1,pointerType:'touch',clientX:10,clientY:10});
+ replayEditor.setSelectionRange(1,1);pendingTimers.get(0)();
+ if(doc().events.at(-1).data.source!=='touch')throw Error('Tap provenance missing');
+ const faithfulExport=currentScore();
+ if(!faithfulExport.score.includes('<SHIFT+LEFT@0:2>')||!faithfulExport.score.includes('<TAP1>')||faithfulExport.score.includes('<CLICK'))throw Error('Faithful export invented clicks or lost navigation');
+ $('score-export-format').value='basic';$('score-export-format').onchange();
+ if(!currentScore().portable)throw Error('Basic compatibility export missing');
+ $('score-lossless').checked=true;$('score-lossless').onchange();
+ if($('score-export-format').value!=='faithful')throw Error('Archive format did not switch to faithful');
+ $('score-lossless').checked=false;
  $('checkpoint-button').onclick();setView('analysis');
  if(!Number.isInteger(doc().revisions.at(-1).eventSequence))throw Error('Missing checkpoint boundary');
  if(!$('analysis-rows').innerHTML.includes('cat') || !$('analysis-rows').innerHTML.includes('100/100'))throw Error('Missing word analysis row');

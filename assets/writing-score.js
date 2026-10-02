@@ -14,10 +14,32 @@ function parse(source,options={}){
  const startTime=options.startTime||'2026-01-01T00:00:00.000Z',base=Date.parse(startTime);
  if(!Number.isFinite(base))throw Error('Invalid start timestamp.');
  const id=options.idFactory||(()=>crypto.randomUUID()),sessionId=id(),events=[],warnings=new Set();
- let text='',start=0,end=0,elapsed=0,clipboard='',run=0,offset=0,rich=null;
+ let text='',start=0,end=0,direction='forward',elapsed=0,clipboard='',run=0,offset=0,rich=null;
  function emit(type,data={}){if(events.length>=LIMIT)throw Error('Score exceeds the 100,000 event limit.');const e={id:id(),sequence:events.length+1,sessionId,timestamp:new Date(base+elapsed).toISOString(),elapsedMs:elapsed,type,data:{...data,synthetic:true,scoreDerived:true}};events.push(e);return e;}
  function point(position){if(!Number.isSafeInteger(position)||position<0||position>text.length)throw Error('Cursor position '+position+' is outside the current text (length '+text.length+').');if(position>0&&position<text.length&&/[\uD800-\uDBFF]/.test(text[position-1])&&/[\uDC00-\uDFFF]/.test(text[position]))throw Error('A cursor position splits a Unicode surrogate pair.');}
- function select(a,b){point(a);point(b);if(a>b)throw Error('Selection start must precede its end.');start=a;end=b;emit('selection',{start:a,end:b,direction:'forward'});}
+ function select(a,b,backward=false,source='unknown'){point(a);point(b);if(a>b)throw Error('Selection start must precede its end.');start=a;end=b;direction=backward?'backward':'forward';emit('selection',{start:a,end:b,direction,source});}
+ function navigate(action,a,b,backward,modifiers=[]){
+  if(a===undefined){
+   const shift=modifiers.includes('SHIFT'),anchor=direction==='backward'?end:start,focus=direction==='backward'?start:end;
+   let target=focus;
+   const previous=p=>p>1&&/[\uDC00-\uDFFF]/.test(text[p-1])&&/[\uD800-\uDBFF]/.test(text[p-2])?p-2:Math.max(0,p-1);
+   const next=p=>p+1<text.length&&/[\uD800-\uDBFF]/.test(text[p])&&/[\uDC00-\uDFFF]/.test(text[p+1])?p+2:Math.min(text.length,p+1);
+   const lineStart=p=>p===0?0:text.lastIndexOf('\n',p-1)+1,lineEnd=p=>{const n=text.indexOf('\n',p);return n<0?text.length:n;};
+   if(action==='ALL'){a=0;b=text.length;backward=false;}
+   else if(modifiers.some(m=>m!=='SHIFT')&&!['HOME','END'].includes(action))throw Error('Modified navigation needs a recorded target, e.g. <CTRL+LEFT@0:0>.');
+   if(action==='LEFT')target=!shift&&start!==end?start:previous(focus);
+   else if(action==='RIGHT')target=!shift&&start!==end?end:next(focus);
+   else if(action==='HOME')target=modifiers.includes('CTRL')||modifiers.includes('META')?0:lineStart(focus);
+   else if(action==='END')target=modifiers.includes('CTRL')||modifiers.includes('META')?text.length:lineEnd(focus);
+   else if(action==='UP'){const from=lineStart(focus),column=focus-from;target=from===0?0:Math.min(lineStart(from-1)+column,from-1);}
+   else if(action==='DOWN'){const to=lineEnd(focus),column=focus-lineStart(focus);target=to===text.length?text.length:Math.min(to+1+column,lineEnd(to+1));}
+   else if(action!=='ALL')throw Error('Page navigation needs a recorded target.');
+   if(action!=='ALL'){if(target>0&&target<text.length&&/[\uD800-\uDBFF]/.test(text[target-1])&&/[\uDC00-\uDFFF]/.test(text[target]))target--;a=shift?Math.min(anchor,target):target;b=shift?Math.max(anchor,target):target;backward=shift&&target<anchor;}
+  }
+  point(a);point(b);if(a>b)throw Error('Navigation selection start must precede its end.');
+  emit('navigation',{source:'keyboard',action,modifiers,start:a,end:b,direction:backward?'backward':'forward'});
+  select(a,b,backward,'keyboard');
+ }
  function patch(a,count,insert,inputType,timingRun=null){point(a);point(a+count);if(typeof insert!=='string')throw Error('Inserted text must be a string.');emit('before_input',{inputType,data:insert||null,selectionStart:a,selectionEnd:a+count,isComposing:false});text=text.slice(0,a)+insert+text.slice(a+count);start=end=a+insert.length;emit('text_change',{start:a,deleteCount:count,insert,inputType,selectionStart:start,selectionEnd:end,scoreRun:timingRun});}
  function type(value){const timingRun=++run;for(const c of value)patch(start,end-start,c,c==='\n'?'insertLineBreak':'insertText',timingRun);}
  function remove(count,forward=false){if(start!==end){patch(start,end-start,'',forward?'deleteContentForward':'deleteContentBackward');return;}const available=forward?text.length-end:start;if(count>available)warnings.add('A delete ran past the text boundary and was limited to the available characters.');count=Math.min(count,available);if(count)patch(forward?start:start-count,count,'',forward?'deleteContentForward':'deleteContentBackward');}
@@ -36,19 +58,22 @@ function parse(source,options={}){
   if(token==='LT'||token==='GT'){type(token==='LT'?'<':'>');continue;}
   let m;
   if((m=/^(DEL|FWD)(\d*)$/.exec(token))){const count=Number(m[2]||1);if(!Number.isSafeInteger(count)||count<1)throw Error('Delete count must be a positive integer.');remove(count,m[1]==='FWD');continue;}
-  if((m=/^CLICK(\d+)$/.exec(token))){select(Number(m[1]),Number(m[1]));continue;}
-  if((m=/^SELECT(\d+):(\d+)$/.exec(token))){select(Number(m[1]),Number(m[2]));continue;}
+  if((m=/^(CLICK|TAP)(\d+)(?::(\d+))?(?::(B))?$/.exec(token))){const a=Number(m[2]),b=m[3]===undefined?a:Number(m[3]);point(a);point(b);if(a>b)throw Error('Selection start must precede its end.');emit('navigation',{source:m[1]==='TAP'?'touch':'pointer',start:a,end:b,direction:m[4]?'backward':'forward'});select(a,b,!!m[4],m[1]==='TAP'?'touch':'pointer');continue;}
+  if((m=/^MOVE(\d+)$/.exec(token))){select(Number(m[1]),Number(m[1]));continue;}
+  if((m=/^SELECT(\d+):(\d+)(?::(B))?$/.exec(token))){select(Number(m[1]),Number(m[2]),!!m[3]);continue;}
+  if((m=/^((?:(?:SHIFT|CTRL|META|ALT)\+)*)(LEFT|RIGHT|UP|DOWN|HOME|END|PAGEUP|PAGEDOWN|ALL)(?:@(\d+):(\d+)(?::(B))?)?$/.exec(token))){navigate(m[2],m[3]===undefined?undefined:Number(m[3]),m[4]===undefined?undefined:Number(m[4]),!!m[5],m[1].split('+').filter(Boolean));continue;}
   if(token==='COPY'||token==='CUT'){clipboard=text.slice(start,end);emit(token.toLowerCase(),{selectionStart:start,selectionEnd:end,selectedText:clipboard});if(token==='CUT' && start!==end)patch(start,end-start,'','deleteByCut');continue;}
   if(token==='PASTE'){emit('paste',{selectionStart:start,selectionEnd:end});patch(start,end-start,clipboard,'insertFromPaste');continue;}
-  if((m=/^(TEXT|PASTE|BASE|PATCH|CLIP):(.+)$/.exec(token))){const value=decode(m[2]);
+  if((m=/^(TEXT|PASTE|BASE|PATCH|CLIP|CUT):(.+)$/.exec(token))){const value=decode(m[2]);
    if(m[1]==='TEXT'){if(typeof value!=='string')throw Error('TEXT payload must be a string.');type(value);}
    if(m[1]==='PASTE'){if(typeof value!=='string')throw Error('PASTE payload must be a string.');emit('paste',{selectionStart:start,selectionEnd:end});patch(start,end-start,value,'insertFromPaste');}
    if(m[1]==='BASE'){if(typeof value!=='string')throw Error('BASE payload must be a string.');text=value;start=end=value.length;emit('document_open',{text:value,source:'score-snapshot'});}
    if(m[1]==='PATCH'){if(!value||!Number.isInteger(value.start)||!Number.isInteger(value.deleteCount)||value.deleteCount<0||typeof value.insert!=='string')throw Error('Invalid PATCH payload.');patch(value.start,value.deleteCount,value.insert,value.inputType||'insertReplacementText');}
    if(m[1]==='CLIP'){if(!value||!['copy','cut'].includes(value.kind))throw Error('Invalid CLIP payload.');select(value.start,value.end);clipboard=text.slice(start,end);emit(value.kind,{selectionStart:start,selectionEnd:end,selectedText:clipboard});}
+   if(m[1]==='CUT'){if(!value)throw Error('Invalid CUT payload.');select(value.start,value.end);clipboard=text.slice(start,end);emit('cut',{selectionStart:start,selectionEnd:end,selectedText:clipboard});if(start!==end)patch(start,end-start,'','deleteByCut');}
    continue;
   }
-  if(/^(CLICK|SELECT|DEL|FWD)/.test(token))throw Error('Malformed cursor or delete token '+raw+' at character '+offset+'.');
+  if(/^(CLICK|TAP|MOVE|SELECT|DEL|FWD|LEFT|RIGHT|UP|DOWN|HOME|END|PAGEUP|PAGEDOWN|ALL|SHIFT\+|CTRL\+|META\+|ALT\+)/.test(token))throw Error('Malformed cursor or delete token '+raw+' at character '+offset+'.');
   warnings.add('Unsupported token '+raw+' was retained in the log but has no simulated effect.');emit('score_unknown',{raw,offset});
  }
  if(rich){
@@ -60,50 +85,6 @@ function parse(source,options={}){
  return {text,cursor:start,elapsedMs:elapsed,events,warnings:[...warnings],lossless:false};
 }
 function validateEvents(events){const ids=new Set();for(const e of events){if(!e||typeof e.id!=='string'||ids.has(e.id)||typeof e.sessionId!=='string'||typeof e.type!=='string'||!Number.isInteger(e.sequence)||!Number.isFinite(e.elapsedMs)||e.elapsedMs<0||!Number.isFinite(Date.parse(e.timestamp))||!e.data||typeof e.data!=='object'||Array.isArray(e.data)&&e.data.length>0)throw Error('Invalid event in lossless archive.');ids.add(e.id);}}
-function exportExtended(document,options={}){
- const events=document.events||[];validateEvents(events);
- const out=[],warnings=new Set();let text='',start=0,end=0,last=null;
- function wait(e){let ms=0;if(last){ms=last.sessionId===e.sessionId?e.elapsedMs-last.elapsedMs:Date.parse(e.timestamp)-Date.parse(last.timestamp);if(ms<0){warnings.add('A clock moved backwards; that compact pause was set to zero.');ms=0;}}else ms=e.elapsedMs;if(ms>0)out.push('<'+String(Math.round(ms*1000000)/1000000000)+'>');last=e;}
- function click(position){if(start!==position||end!==position){out.push('<CLICK'+position+'>');start=end=position;}}
- for(const e of events){const d=e.data||{};
-  if(e.type==='score_token'){out.push(d.raw);last=e;continue;}
-  if(d.scoreDerived){
-   if(e.type==='text_change'){text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;}
-   if(e.type==='selection'){start=d.start;end=d.end;}
-   if(['session_start','document_open'].includes(e.type)&&typeof d.text==='string'){text=d.text;start=end=text.length;}
-   continue;
-  }
-  if(e.type==='text_change'){
-   if(!Number.isInteger(d.start)||!Number.isInteger(d.deleteCount)||d.start<0||d.deleteCount<0||d.start+d.deleteCount>text.length||typeof d.insert!=='string')throw Error('Cannot export an invalid text patch.');
-   wait(e);
-   const typed=d.inputType==='insertText'&&Array.from(d.insert).length===1&&!d.deleteCount;
-   const deletion=!d.insert&&d.deleteCount>0;
-   if(typed){click(d.start);out.push(escapeText(d.insert));}
-   else if(deletion){click(d.start+d.deleteCount);out.push('<DEL'+(d.deleteCount===1?'':d.deleteCount)+'>');}
-   else{out.push(payload('PATCH',{start:d.start,deleteCount:d.deleteCount,insert:d.insert,inputType:d.inputType||'insertReplacementText'}));}
-   text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;continue;
-  }
-  if(e.type==='selection'){wait(e);if(d.start===d.end){out.push('<CLICK'+d.start+'>');}else{out.push('<SELECT'+d.start+':'+d.end+'>');}start=d.start;end=d.end;continue;}
-  if(e.type==='copy'||e.type==='cut'){wait(e);out.push(payload('CLIP',{kind:e.type,start:d.selectionStart,end:d.selectionEnd}));start=d.selectionStart;end=d.selectionEnd;continue;}
-  if(['session_start','document_open','recording_resumed','recording_paused','revision_restore','checkpoint'].includes(e.type)&&typeof d.text==='string'){
-   // Preserve recorded snapshot boundaries as snapshots, never pretend the contents were typed.
-   if(d.text!==text){wait(e);out.push(payload('BASE',d.text));text=d.text;start=end=text.length;}
-   else if(e.type==='session_start' && !last)last=e;
-   continue;
-  }
-  // Other events are retained by the optional archive, not fabricated as score actions.
-  if(!['before_input','keydown','keyup','paste','score_unknown'].includes(e.type))warnings.add('Compact export omits non-text events and their metadata. Use the lossless archive to retain the complete document log.');
- }
- // Imported score markers are the source of truth for their derived text/cursor state.
- if(events.some(e=>e.type==='score_token')){
-  const projected=parse(out.join(''));
-  text=projected.text;start=projected.cursor;
- }
- if(text!==document.text){out.push(payload('BASE',document.text));warnings.add('Final text needed a snapshot (some changes were not recorded).');}
- if(options.lossless)out.push(payload('RICH',{version:1,document}));
- const score=out.join('');if(score.length>MAX_SOURCE)throw Error('This score exceeds the 2 MB import limit. Try compact export, or use Export JSON in Writing process for the full log.');
- return {score,warnings:[...warnings],lossless:!!options.lossless};
-}
 // Lower semantic edits to the original notation. Selections and clipboard operations
 // become explicit cursor moves, backward deletions, and literal insertions.
 function toPortable(source){
@@ -112,6 +93,7 @@ function toPortable(source){
  const basic=/^(?:\d+(?:\.\d+)?|ENTER|DEL\d*|CLICK\d+)$/;
  const tokens=Array.from(source.matchAll(/<([^<>]*)>/g));
  if(tokens.every(m=>basic.test(m[1])))return {score:source,warnings:[...warnings],portable:true};
+ warnings.add('Basic compatibility output may synthesize CLICK positioning and expand selections or clipboard actions. Use faithful notation to represent user actions.');
  const out=[];let text='',cursor=0,lastMs=0;
  function wait(e){const delta=e.elapsedMs-lastMs;if(delta>0)out.push('<'+String(delta/1000)+'>');lastMs=e.elapsedMs;}
  function click(position){if(cursor!==position){out.push('<CLICK'+position+'>');cursor=position;}}
@@ -130,11 +112,69 @@ function toPortable(source){
  if(parse(score).text!==parsed.text)throw Error('Portable score failed validation.');
  return {score,warnings:[...warnings],portable:true};
 }
+const navigationKeys={ArrowLeft:'LEFT',ArrowRight:'RIGHT',ArrowUp:'UP',ArrowDown:'DOWN',Home:'HOME',End:'END',PageUp:'PAGEUP',PageDown:'PAGEDOWN'};
+function exportFaithful(document,options={}){
+ const events=document.events||[];validateEvents(events);
+ const out=[],warnings=new Set();let text='',start=0,end=0,selectionDirection='forward',pendingSelection=null,last=null,pendingCut=null,lastNavigation=null;
+ const isKeyboard=e=>e.type==='keyup'&&e.data.element==='editor'&&(navigationKeys[e.data.key]||(e.data.key?.toLowerCase()==='a'&&(e.data.ctrl||e.data.meta)));
+ const range=d=>({start:d.start??d.selectionStart,end:d.end??d.selectionEnd,direction:d.direction??d.selectionDirection});
+ const matches=r=>r.start===start&&r.end===end&&(start===end||!r.direction||r.direction===selectionDirection);
+ function wait(e){let ms=last?(last.sessionId===e.sessionId?e.elapsedMs-last.elapsedMs:Date.parse(e.timestamp)-Date.parse(last.timestamp)):e.elapsedMs;if(ms<0){warnings.add('A clock moved backwards; that pause was set to zero.');ms=0;}if(ms>0)out.push('<'+String(Math.round(ms)/1000)+'>');last=e;}
+ function valid(r){return Number.isInteger(r.start)&&Number.isInteger(r.end)&&r.start>=0&&r.end>=r.start&&r.end<=text.length;}
+ function unknownSelection(e,r){if(!valid(r)||matches(r))return;wait(e);out.push(r.start===r.end?'<MOVE'+r.start+'>':'<SELECT'+r.start+':'+r.end+(r.direction==='backward'?':B':'')+'>');start=r.start;end=r.end;selectionDirection=r.direction||'forward';warnings.add('Some recorded selections have no known cause. MOVE/SELECT preserve their positions without claiming a click or keypress.');}
+ function navigation(e){const d=e.data,r=range(d);if(!valid(r))return;if(!r.direction&&pendingSelection?.start===r.start&&pendingSelection?.end===r.end)r.direction=pendingSelection.direction;pendingSelection=null;wait(d.actionElapsedMs===undefined?e:{...e,elapsedMs:d.actionElapsedMs,timestamp:d.actionTimestamp||e.timestamp});
+  const backward=r.direction==='backward'?':B':'';
+  if(d.source==='touch'||d.source==='pointer')out.push('<'+(d.source==='touch'?'TAP':'CLICK')+r.start+(r.start===r.end?'':':'+r.end+backward)+'>');
+  else{const action=navigationKeys[d.key]||d.action||(d.key?.toLowerCase()==='a'?'ALL':null);if(!action){unknownSelection(e,r);return;}const mods=d.modifiers||[['ctrl','CTRL'],['meta','META'],['alt','ALT'],['shift','SHIFT']].filter(([key])=>d[key]).map(([,name])=>name);out.push('<'+(mods.length?mods.join('+')+'+':'')+action+'@'+r.start+':'+r.end+backward+'>');}
+  start=r.start;end=r.end;selectionDirection=r.direction||'forward';lastNavigation={key:d.key,start,end};
+ }
+ function followedByNavigation(i,r){for(let j=i+1;j<events.length;j++){const next=events[j];if(next.sessionId!==events[i].sessionId||next.elapsedMs-events[i].elapsedMs>150||next.type==='text_change'||typeof next.data.text==='string')break;if(next.type==='navigation'||isKeyboard(next)){const target=range(next.data);return target.start===r.start&&target.end===r.end;}}return false;}
+ for(let i=0;i<events.length;i++){
+  const e=events[i],d=e.data||{};
+  if(e.type==='score_token'){out.push(d.raw);last=e;continue;}
+  if(d.scoreDerived){if(e.type==='text_change'){text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;}if(e.type==='selection'){start=d.start;end=d.end;selectionDirection=d.direction||'forward';}if(['session_start','document_open'].includes(e.type)&&typeof d.text==='string'){text=d.text;start=end=text.length;}continue;}
+  if(e.type==='keydown'&&d.element==='editor'){lastNavigation=null;continue;}
+  if(e.type==='navigation'){navigation(e);continue;}
+  if(isKeyboard(e)){const r=range(d);if(lastNavigation?.key===d.key&&matches(r))continue;navigation({...e,data:{...d,source:'keyboard'}});continue;}
+  if(e.type==='selection'){const r=range(d);if(followedByNavigation(i,r))pendingSelection=r;else unknownSelection(e,r);continue;}
+  if(e.type==='copy'||e.type==='cut'){
+   const r=range(d);if(!valid(r))throw Error('Invalid clipboard selection in log.');wait(e);
+   let cutDeleted=false;
+   if(e.type==='cut')for(let j=i+1;j<events.length;j++){const next=events[j],patch=next.data;if(next.sessionId!==e.sessionId||next.type==='cut'||typeof patch.text==='string')break;if(next.type==='text_change'){cutDeleted=patch.inputType==='deleteByCut'&&patch.start===r.start&&patch.deleteCount===r.end-r.start&&!patch.insert;break;}}
+   if(e.type==='copy')out.push(matches(r)?'<COPY>':payload('CLIP',{kind:'copy',start:r.start,end:r.end}));
+   else if(cutDeleted){out.push(matches(r)?'<CUT>':payload('CUT',{start:r.start,end:r.end}));pendingCut={start:r.start,deleteCount:r.end-r.start};text=text.slice(0,r.start)+text.slice(r.end);}
+   else{out.push(payload('CLIP',{kind:'cut',start:r.start,end:r.end}));warnings.add('A cut event had no recorded deletion; its clipboard marker is retained without removing text.');}
+   start=r.start;end=cutDeleted?start:r.end;selectionDirection=r.direction||'forward';continue;
+  }
+  if(e.type==='text_change'){
+   if(pendingCut&&d.inputType==='deleteByCut'&&d.start===pendingCut.start&&d.deleteCount===pendingCut.deleteCount&&!d.insert){pendingCut=null;continue;}
+   pendingCut=null;
+   if(!Number.isInteger(d.start)||!Number.isInteger(d.deleteCount)||d.start<0||d.deleteCount<0||d.start+d.deleteCount>text.length||typeof d.insert!=='string')throw Error('Cannot export an invalid text patch.');
+   wait(e);
+   const selected=start!==end&&d.start===start&&d.deleteCount===end-start;
+   const backwardDelete=/^delete(?:Content|Word|SoftLine|HardLine)Backward$/.test(d.inputType),forwardDelete=/^delete(?:Content|Word|SoftLine|HardLine)Forward$/.test(d.inputType);
+   if(d.insert&&(selected||start===end&&d.start===start&&!d.deleteCount)&&['insertText','insertLineBreak','insertParagraph','insertFromPaste'].includes(d.inputType))out.push(d.inputType==='insertFromPaste'?payload('PASTE',d.insert):escapeText(d.insert));
+   else if(!d.insert&&d.deleteCount&&(backwardDelete||forwardDelete)&&(selected||start===end&&(forwardDelete?d.start===start:d.start+d.deleteCount===start)))out.push('<'+(forwardDelete?'FWD':'DEL')+(selected||d.deleteCount===1?'':d.deleteCount)+'>');
+   else{out.push(payload('PATCH',{start:d.start,deleteCount:d.deleteCount,insert:d.insert,inputType:d.inputType||'insertReplacementText'}));if(!selected&&d.start!==start&&d.start+d.deleteCount!==start)warnings.add('An edit has no matching recorded navigation. PATCH preserves the edit without inventing a cursor action.');}
+   text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;continue;
+  }
+  if(typeof d.text==='string'&&['session_start','document_open','recording_resumed','recording_paused','revision_restore','checkpoint'].includes(e.type)){
+   if(d.text!==text){wait(e);out.push(payload('BASE',d.text));text=d.text;start=end=text.length;}
+   else if(e.type==='session_start'&&!last)last=e;
+  }
+ }
+ if(text!==document.text){out.push(payload('BASE',document.text));warnings.add('Final text needed a snapshot because some changes were not recorded.');}
+ if(options.lossless)out.push(payload('RICH',{version:1,document}));
+ const score=out.join('');if(score.length>MAX_SOURCE)throw Error('This score exceeds the 2 MB import limit.');
+ if(parse(score).text!==document.text)throw Error('Faithful score failed final-text validation.');
+ return {score,warnings:[...warnings],lossless:!!options.lossless,portable:false,faithful:true};
+}
 function exportScore(document,options={}){
- const extended=exportExtended(document,options);
- if(options.extended||options.lossless)return {...extended,portable:false};
- const portable=toPortable(extended.score);
- return {...portable,warnings:[...new Set([...extended.warnings,...portable.warnings])],lossless:false};
+ const faithful=exportFaithful(document,options);
+ if(!options.portable)return faithful;
+ if(options.lossless)throw Error('Lossless archives require faithful notation.');
+ const portable=toPortable(faithful.score);
+ return {...portable,warnings:[...new Set([...faithful.warnings,...portable.warnings])],lossless:false,faithful:false};
 }
 function generate(target,options={}){
  if(typeof target!=='string'||!target.length||target.length>5000)throw Error('Target text must contain 1–5,000 characters.');
