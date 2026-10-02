@@ -1,0 +1,10 @@
+'use strict';
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {select}=require('../assets/document-library.js');
+const docs=[{id:'a',title:'Café notes',text:'A quiet morning',updatedAt:'2026-10-01T12:00:00Z'},{id:'b',title:'Draft 10',text:'Birch canoe',updatedAt:'2026-10-01T13:00:00Z',writingScore:{source:'generated'}},{id:'c',title:'Draft 2',text:'A quiet birch',updatedAt:'2026-10-01T11:00:00Z'},{id:'d',title:'Draft 2',text:'Other content',updatedAt:'2026-10-01T10:00:00Z'}];
+test('Search finds accents, title/body text, and multiple terms',()=>{assert.deepEqual(select(docs,{query:'CAFE'}).map(d=>d.id),['a']);assert.deepEqual(select(docs,{query:' quiet birch '}).map(d=>d.id),['c']);});
+test('Writing and score tests can be filtered without deleting either kind',()=>{assert.deepEqual(select(docs,{filter:'tests'}).map(d=>d.id),['b']);assert.equal(select(docs,{filter:'writing'}).length,3);assert.equal(docs.length,4);});
+test('Sorting is natural by title, chronological by edit time, and never mutates storage',()=>{assert.deepEqual(select(docs,{sort:'name'}).map(d=>d.id),['a','c','d','b']);assert.deepEqual(select(docs,{sort:'recent'}).map(d=>d.id),['b','a','c','d']);assert.deepEqual(select(docs,{sort:'oldest'}).map(d=>d.id),['d','c','a','b']);assert.deepEqual(docs.map(d=>d.id),['a','b','c','d']);});
+test('A large collection retains every occurrence and supports specific searches',()=>{const many=Array.from({length:300},(_,i)=>({id:String(i),title:'Document '+i,text:'Text '+i,updatedAt:new Date(1700000000000+i*1000).toISOString()}));assert.equal(select(many).length,300);assert.deepEqual(select(many,{query:'Document 299'}).map(d=>d.id),['299']);assert.equal(new Set(select(many).map(d=>d.id)).size,300);});
+test('Empty queries, no matches, missing titles and invalid dates are safe',()=>{assert.equal(select(docs,{query:'   '}).length,4);assert.equal(select(docs,{query:'unfindable'}).length,0);assert.equal(select([{id:'empty'}],{query:'untitled'}).length,1);});

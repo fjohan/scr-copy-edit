@@ -1,0 +1,15 @@
+'use strict';
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {band,render}=require('../assets/word-heatmap.js');
+const {tokens,analyze}=require('../assets/word-analysis.js');
+const score=require('../assets/writing-score.js');
+const visible=html=>html.replace(/<[^>]*>/g,'').replace(/&(amp|lt|gt|quot|#39);/g,(_,entity)=>({amp:'&',lt:'<',gt:'>',quot:'"','#39':"'"}[entity]));
+const rowsFor=text=>tokens(text).map((t,i)=>({...t,index:i+1,word:t.text,purity:100,provenance:'Recorded typing'}));
+test('Bands match purity and keep unknown history separate from untouched',()=>{assert.deepEqual([100,50,33,25,20,0,null,undefined,NaN].map(band),['untouched','light','moderate','high','heavy','heavy','unknown','unknown','unknown']);});
+test('Heatmap preserves punctuation, spaces, linebreaks, and repeated word occurrences',()=>{const text="word,  word!\n\nCafé isn't co-op.\t🙂\n";const rows=rowsFor(text);rows[1].purity=25;const html=render(text,rows);assert.equal(visible(html),text);assert.match(html,/data-heatmap-word="1"/);assert.match(html,/data-heatmap-word="2"/);assert.match(html,/heat-high/);assert.equal((html.match(/<button /g)||[]).length,rows.length);});
+test('Both text and accessible labels escape markup safely',()=>{const text='<img src=x onerror="bad"> & <script>bad</script>';const html=render(text,rowsFor(text));assert.equal(visible(html),text);assert.doesNotMatch(html,/<img|<script/);assert.match(html,/&lt;/);assert.match(html,/&quot;/);});
+test('Unknown words have explicit hatching class and accessible unknown label',()=>{const rows=rowsFor('old text');rows.forEach(row=>{row.purity=null;row.provenance='Incomplete';});const html=render('old text',rows);assert.equal((html.match(/heat-unknown/g)||[]).length,2);assert.match(html,/History unknown/);assert.doesNotMatch(html,/heat-untouched/);});
+test('Malformed or mismatched offsets are rejected rather than highlighting the wrong text',()=>{for(const row of [{start:0,end:8,word:'word'},{start:0,end:4,word:'wrong'},{start:-1,end:4,word:'word'}])assert.throws(()=>render('word',[{...row,index:1,purity:100}]));assert.throws(()=>render('word',[...rowsFor('word'),...rowsFor('word')]));});
+test('Checkpoint analysis from a corrected score supplies distinct edited/untouched colors',()=>{const parsed=score.parse('cat dog<CLICK2><DEL>a');const events=[...parsed.events,{id:'cp',sequence:parsed.events.length+1,sessionId:parsed.events[0].sessionId,timestamp:parsed.events.at(-1).timestamp,elapsedMs:parsed.elapsedMs,type:'checkpoint',data:{revisionId:'r',text:parsed.text}}];const result=analyze({events,revisions:[{id:'r',title:'Final',text:parsed.text,date:events.at(-1).timestamp,eventSequence:events.length}]});const html=render(parsed.text,result.rows);assert.equal(visible(html),'cat dog');assert.match(html,/heat-untouched/);assert.match(html,/heat-moderate/);});
+test('A checkpoint with punctuation but no words still renders exactly',()=>{assert.equal(visible(render('...\n\n',[])),'...\n\n');});

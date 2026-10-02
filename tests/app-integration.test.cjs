@@ -1,0 +1,130 @@
+'use strict';
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const vm=require('node:vm');
+const fs=require('node:fs');
+const path=require('node:path');
+class Element {
+ constructor(id){this.id=id;this.value='';this.innerHTML='';this.textContent='';this.style={};this.dataset={};this.listeners={};this.scrollHeight=560;this.selectionStart=0;this.selectionEnd=0;this.classList={toggle(){},add(){},remove(){}};}
+ addEventListener(type,fn){this.listeners[type]=fn;}setAttribute(key,value){this[key]=value;}querySelectorAll(){return [];}querySelector(){return null;}focus(){}select(){}setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}showModal(){}close(){}
+}
+test('Editor events, checkpoint capture, analysis tab, and JSON export work together',async()=>{
+ const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,new Element(id));return elements.get(id);};
+ const saved=new Map();let downloaded=null;
+ const context={pendingTimers:new Map(),console,crypto:require('node:crypto').webcrypto,performance,structuredClone,innerWidth:390,innerHeight:844,navigator:{userAgent:'test'},setTimeout(fn,ms){context.pendingTimers.set(ms,fn);return ms;},clearTimeout(ms){context.pendingTimers.delete(ms);},setInterval:()=>1,clearInterval(){},TextEncoder,TextDecoder,btoa,atob,AbortController,Blob,URL:{createObjectURL(blob){downloaded=blob;return 'blob:test';},revokeObjectURL(){}},localStorage:{getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)},fetch:async()=>({ok:false}),window:{addEventListener(){}},document:{getElementById:get,querySelectorAll:()=>[],querySelector:()=>new Element(''),addEventListener(){},execCommand(){},createElement:()=>({click(){}})}};
+ vm.createContext(context);
+ for(const file of ['text-edits.js','word-analysis.js','word-heatmap.js','writing-score.js','document-library.js','workspace-storage.js','app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets',file),'utf8'),context);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(get('editor').spellcheck,'false');
+ assert.equal(get('editor').autocorrect,'on');
+ get('writing-settings').onclick();
+ get('setting-spellcheck').checked=true;get('setting-spellcheck').onchange({target:get('setting-spellcheck')});
+ assert.equal(get('editor').spellcheck,'true');
+ assert.equal(get('editor').autocorrect,'on');
+ get('setting-autocorrect').checked=false;get('setting-autocorrect').onchange({target:get('setting-autocorrect')});
+ assert.equal(get('editor').autocorrect,'off');
+ get('setting-autocorrect').checked=true;get('setting-autocorrect').onchange({target:get('setting-autocorrect')});
+ assert.equal(get('editor').autocorrect,'on');
+ assert.deepEqual(JSON.parse(saved.get('margin-writing-settings')),{spellcheck:true,autocorrect:true});
+ vm.runInContext('writingSettings={spellcheck:false,autocorrect:false};applyWritingSettings();writingSettings=readWritingSettings();applyWritingSettings();',context);
+ assert.equal(get('editor').spellcheck,'true');
+ assert.equal(get('editor').autocorrect,'on');
+ get('setting-spellcheck').checked=false;get('setting-spellcheck').onchange({target:get('setting-spellcheck')});
+ get('setting-autocorrect').checked=false;get('setting-autocorrect').onchange({target:get('setting-autocorrect')});
+ assert.equal(get('editor').spellcheck,'false');
+ assert.equal(get('editor').autocorrect,'off');
+ vm.runInContext(`
+ newDocument();setView('analysis');
+ if(!$('analysis-warning').textContent.includes('Save a checkpoint'))throw Error('Missing empty state');
+ setView('write');
+ for(const letter of 'cat '){const editor=$('editor');editor.selectionStart=editor.selectionEnd=editor.value.length;editor.listeners.beforeinput({target:editor,inputType:'insertText',data:letter,isComposing:false});editor.value+=letter;editor.listeners.input({target:editor,inputType:'insertText'});}
+ $('checkpoint-button').onclick();setView('analysis');
+ if(!Number.isInteger(doc().revisions.at(-1).eventSequence))throw Error('Missing checkpoint boundary');
+ if(!$('analysis-rows').innerHTML.includes('cat') || !$('analysis-rows').innerHTML.includes('100/100'))throw Error('Missing word analysis row');
+ if(!$('word-heatmap').innerHTML.includes('heat-untouched') || $('analysis-heatmap-panel').hidden)throw Error('Default heatmap missing');
+ $('analysis-show-table').onclick();if(!$('analysis-heatmap-panel').hidden || $('analysis-table-panel').hidden)throw Error('Table toggle failed');
+ $('analysis-show-heatmap').onclick();
+ const heatButton={dataset:{heatmapWord:'1'},setAttribute(){}};
+ $('word-heatmap').onclick({target:{closest:()=>heatButton}});
+ if(!$('heatmap-word-detail').innerHTML.includes('Purity 100/100') || !$('heatmap-word-detail').innerHTML.includes('Occurrence 1'))throw Error('Word inspection failed');
+ $('export-analysis').onclick();
+ `,context);
+ const exported=JSON.parse(await downloaded.text());assert.equal(exported.rows[0].word,'cat');assert.equal(exported.rows[0].purity,100);assert.equal(exported.rows[0].pauseAfter.ms>=0,true);assert.equal(exported.checkpoint.id,vm.runInContext('doc().revisions.at(-1).id',context));
+ await vm.runInContext('persist()',context);
+ const persisted=JSON.parse(saved.get('margin-workspace'));assert.ok(persisted.documents[0].revisions.at(-1).eventSequence>0);
+ vm.runInContext(`
+ const priorDocument=doc(),priorText=doc().text,priorCount=state.documents.length;
+ setView('score');$('score-sample').onclick();
+ if($('score-validation').textContent!=='Exact text match')throw Error('Fixture preview mismatch');
+ $('score-import').onclick();
+ if(state.documents.length!==priorCount+1 || priorDocument.text!==priorText)throw Error('Import overwrote the current draft');
+ if(doc().text!==MarginWritingScore.sampleText)throw Error('Wrong imported text');
+ if(!doc().writingScore.synthetic || currentView!=='process')throw Error('Import source/view missing');
+ setView('analysis');if(!$('analysis-rows').innerHTML.includes('Writing'))throw Error('Imported analysis missing');
+ setView('score');$('score-lossless').checked=true;$('score-from-document').onclick();
+ if(!MarginWritingScore.parse($('score-source').value).lossless)throw Error('Lossless export missing');
+ const richEventIds=new Set(doc().events.map(e=>e.id));$('score-import').onclick();
+ if(doc().events.some(e=>richEventIds.has(e.id)))throw Error('Imported event IDs were reused');
+ setView('score');$('score-expected').value='A new target text.';$('score-seed').value='integration';$('score-edits').value='4';$('score-generate').onclick();
+ if($('score-validation').textContent!=='Exact text match')throw Error('Generated preview mismatch');
+ if(/<(SELECT|COPY|CUT|PASTE)/.test($('score-source').value))throw Error('Generator leaked extension tokens');
+ $('score-import').onclick();
+ if(doc().text!=='A new target text.' || doc().writingScore.seed!=='integration')throw Error('Generated import provenance missing');
+ setView('score');$('score-extended').checked=true;$('score-generate').onclick();
+ if(!/<SELECT/.test($('score-source').value))throw Error('Explicit extended mode missing');
+ $('score-portable').onclick();if(/<(SELECT|COPY|CUT|PASTE)/.test($('score-source').value))throw Error('Portable conversion leaked extensions');
+ if($('score-validation').textContent!=='Exact text match')throw Error('Portable UI conversion mismatch');
+ $('document-search').value='nonexistent-title';$('document-search').listeners.input({target:$('document-search')});
+ if(!$('document-list').innerHTML.includes('No documents found') || $('show-current-document').hidden)throw Error('Missing filtered library empty state');
+ $('show-current-document').onclick();if(!$('document-list').innerHTML.includes(doc().id))throw Error('Current document recovery failed');
+ $('document-filter').onchange({target:{value:'writing'}});if($('show-current-document').hidden)throw Error('Test filter failed');
+ newDocument();if($('document-search').value!=='' || $('document-filter').value!=='all' || !$('document-list').innerHTML.includes(doc().id))throw Error('New document stayed hidden by filters');
+ $('document-search').value='Writing score example';$('document-search').listeners.input({target:$('document-search')});
+ if(!visibleDocuments.length)throw Error('Title search failed');
+ const foundId=visibleDocuments[0].id;$('document-search').listeners.keydown({key:'Enter',preventDefault(){}});if(doc().id!==foundId)throw Error('Search Enter did not open result');
+ $('clear-document-search').onclick();if($('document-search').value!=='')throw Error('Clear search failed');
+ $('document-sort').onchange({target:{value:'name'}});if(localStorage.getItem('margin-library-sort')!=='name')throw Error('Sort preference not saved');
+ $('capture-toggle').onclick();
+ const pauseEvents=doc().events.length,oldBody=doc().text;
+ $('editor').value=oldBody+' offline';$('editor').listeners.input({target:$('editor'),inputType:'insertText'});
+ if(doc().events.length!==pauseEvents)throw Error('Paused recording captured events');
+ if(!pendingTimers.has(180))throw Error('Paused edits did not schedule autosave');pendingTimers.get(180)();
+
+ 
+ 
+ `,context);
+ await await vm.runInContext('persist()',context);
+ assert.equal(JSON.parse(saved.get('margin-workspace')).documents.find(d=>d.id===vm.runInContext('doc().id',context)).text,vm.runInContext('doc().text',context));
+ const setItem=context.localStorage.setItem;
+ context.localStorage.setItem=()=>{throw Error('QuotaExceededError');};
+ vm.runInContext('serverReady=true;csrfToken="test";',context);
+ await vm.runInContext('persist()',context);
+ assert.match(get('save-status').textContent,/Device save failed/);
+ await vm.runInContext('sync()',context);
+ assert.match(get('save-status').textContent,/Not saved/);
+ context.localStorage.setItem=setItem;
+ await vm.runInContext('persist()',context);
+ assert.equal(vm.runInContext('localSaveFailed',context),false);
+ await vm.runInContext(`(async()=>{
+  const initialCount=state.documents.length;
+  const inactive=state.documents.find(d=>d.id!==state.activeId);
+  $('document-list').onclick({target:{closest:selector=>selector==='[data-delete-document]'?{dataset:{deleteDocument:inactive.id}}:null}});
+  if(!$('delete-document-message').textContent.includes(inactive.title))throw Error('Delete confirmation omitted title');
+  $('cancel-delete-document').onclick();
+  if(state.documents.length!==initialCount)throw Error('Cancel deleted document');
+  openDeleteDocument(inactive.id);
+  await $('confirm-delete-document').onclick();
+  if(state.documents.some(d=>d.id===inactive.id)||state.documents.length!==initialCount-1)throw Error('Inactive document was not deleted');
+  const active=state.activeId;
+  openDeleteDocument(active);
+  await $('confirm-delete-document').onclick();
+  if(state.activeId===active||!doc())throw Error('Active document deletion did not select another document');
+  while(state.documents.length>1){openDeleteDocument(state.documents[0].id);await $('confirm-delete-document').onclick();}
+  const last=state.documents[0].id;
+  openDeleteDocument(last);
+  await $('confirm-delete-document').onclick();
+  if(state.documents.length!==1||state.documents[0].id===last||doc().text!=='')throw Error('Last deletion did not open a blank draft');
+ })()`,context);
+ assert.equal(JSON.parse(saved.get('margin-workspace')).documents.length,1);
+ assert.equal(JSON.parse(saved.get('margin-workspace')).documents[0].text,'');
+});
