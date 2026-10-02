@@ -189,8 +189,9 @@ $('export-analysis').onclick=()=>{const result=MarginWordAnalysis.analyze(doc())
 let scoreGeneration=null;
 function updateScoreDocumentLabel(){$('score-from-document').title='Export '+doc().title;}
 function scoreError(error){$('score-validation').textContent='Could not parse';$('score-validation').className='score-failed';$('score-messages').textContent=error.message;$('score-final').textContent='Correct the score and preview again.';$('score-metrics').textContent='';}
+const scoreInputFormat=()=>$('score-input-format').value==='margin'?'margin':'webscriptlog';
 function previewScore(){
- try{const result=MarginWritingScore.parse($('score-source').value);const expected=$('score-expected').value;
+ try{const result=MarginWritingScore.parse($('score-source').value,{format:scoreInputFormat()});const expected=$('score-expected').value;
  $('score-final').textContent=result.text;
  $('score-metrics').textContent=`${result.text.length} UTF-16 units · ${result.events.length.toLocaleString()} events · ${(result.elapsedMs/1000).toFixed(3)} s · ${result.lossless?'Archived log':'Synthetic log'}`;
  $('score-validation').className='';
@@ -202,14 +203,15 @@ function previewScore(){
  }catch(error){scoreError(error);return null;}
 }
 $('score-preview').onclick=previewScore;
+$('score-input-format').onchange=()=>{scoreGeneration=null;previewScore();};
 $('score-source').addEventListener('input',()=>{scoreGeneration=null;$('score-validation').textContent='Preview to validate changes';});
-$('score-sample').onclick=()=>{$('score-source').value=MarginWritingScore.sample;$('score-expected').value=MarginWritingScore.sampleText;$('score-title').value='Writing score example';scoreGeneration=null;previewScore();};
-$('score-generate').onclick=()=>{try{const generated=MarginWritingScore.generate($('score-expected').value,{seed:$('score-seed').value,edits:Number($('score-edits').value),extended:!!$('score-extended').checked});scoreGeneration=generated;$('score-source').value=generated.score;previewScore();toast('Score generated. Preview it, then create a test document.');}catch(error){scoreError(error);}};
+$('score-sample').onclick=()=>{$('score-input-format').value='webscriptlog';$('score-source').value=MarginWritingScore.sample;$('score-expected').value=MarginWritingScore.sampleText;$('score-title').value='Writing score example';scoreGeneration=null;previewScore();};
+$('score-generate').onclick=()=>{try{const generated=MarginWritingScore.generate($('score-expected').value,{seed:$('score-seed').value,edits:Number($('score-edits').value),extended:!!$('score-extended').checked,format:$('score-extended').checked?'webscriptlog':undefined});scoreGeneration=generated;$('score-input-format').value='webscriptlog';$('score-source').value=generated.score;previewScore();toast('Score generated. Preview it, then create a test document.');}catch(error){scoreError(error);}};
 $('score-import').onclick=()=>{
  const preview=previewScore();if(!preview)return;
  if($('score-expected').value && preview.text!==$('score-expected').value){toast('Expected text differs. Correct it or clear the expected text to import.');return;}
  try{
- const result=preview.lossless?preview:MarginWritingScore.parse($('score-source').value,{startTime:new Date(Date.now()-preview.elapsedMs).toISOString()});
+ const result=preview.lossless?preview:MarginWritingScore.parse($('score-source').value,{startTime:new Date(Date.now()-preview.elapsedMs).toISOString(),format:scoreInputFormat()});
  const source=result.document;
  const d=source?structuredClone(source):seedDocument($('score-title').value.trim()||'Writing score test',result.text);
  const originalId=source?.id;d.id=uid();d.title=$('score-title').value.trim()||source?.title||'Writing score test';d.text=result.text;d.comments=source?.comments?structuredClone(source.comments):[];d.revisions=source?.revisions?structuredClone(source.revisions):[];
@@ -218,17 +220,17 @@ $('score-import').onclick=()=>{
  for(const r of d.revisions){r.originalRevisionId=r.id;r.id=revisionIds.get(r.id);if(r.eventSequence)r.eventSequence=sequences.get(r.eventSequence)??0;}
  const last=d.events.at(-1),revision={id:uid(),title:'Imported final text',text:d.text,comments:structuredClone(d.comments),date:last?.timestamp||new Date().toISOString(),major:false,capturePaused:false,eventSequence:d.events.length+1};
  d.events.push({id:uid(),sequence:d.events.length+1,sessionId:last?.sessionId||uid(),timestamp:revision.date,elapsedMs:last?.elapsedMs||0,type:'checkpoint',data:{revisionId:revision.id,text:d.text,title:d.title,synthetic:!result.lossless}});d.revisions.push(revision);
- d.createdAt=source?.createdAt||d.events[0].timestamp;d.updatedAt=new Date().toISOString();d.writingScore={source:scoreGeneration?'generated':'imported',synthetic:!result.lossless,seed:scoreGeneration?.seed??null,editPasses:scoreGeneration?.edits??null,sourceDocumentId:originalId??null,warnings:result.warnings};
+ d.createdAt=source?.createdAt||d.events[0].timestamp;d.updatedAt=new Date().toISOString();d.writingScore={format:result.format||'margin',source:scoreGeneration?'generated':'imported',synthetic:!result.lossless,seed:scoreGeneration?.seed??null,editPasses:scoreGeneration?.edits??null,sourceDocumentId:originalId??null,warnings:result.warnings};
  state.documents.unshift(d);resetLibrary();switchDocument(d.id);setView('process');persist();toast('Test document created with a log and final checkpoint.');
  }catch(error){scoreError(error);}
 };
-function currentScore(){return MarginWritingScore.exportScore(doc(),{lossless:!!$('score-lossless').checked,portable:$('score-export-format').value==='basic'});}
-$('score-from-document').onclick=()=>{try{const exported=currentScore();$('score-source').value=exported.score;$('score-expected').value=doc().text;scoreGeneration=null;previewScore();if(exported.warnings.length)$('score-messages').textContent=exported.warnings.join(' ');}catch(error){scoreError(error);}};
+function currentScore(){const lossless=!!$('score-lossless').checked,chosen=$('score-export-format').value;return MarginWritingScore.exportScore(doc(),{lossless,portable:!lossless&&chosen==='basic',format:!lossless&&chosen!=='faithful'&&chosen!=='basic'?'webscriptlog':'margin'});}
+$('score-from-document').onclick=()=>{try{const exported=currentScore();$('score-source').value=exported.score;$('score-input-format').value=exported.format==='margin'?'margin':'webscriptlog';$('score-expected').value=doc().text;scoreGeneration=null;previewScore();if(exported.warnings.length)$('score-messages').textContent=exported.warnings.join(' ');}catch(error){scoreError(error);}};
 $('score-download').onclick=()=>{try{const exported=currentScore();download((doc().title||'draft')+'.score.txt',exported.score,'text/plain');$('score-messages').textContent=exported.warnings.join(' ');}catch(error){scoreError(error);}};
 
 $('score-lossless').onchange=()=>{if($('score-lossless').checked)$('score-export-format').value='faithful';};
-$('score-export-format').onchange=()=>{if($('score-export-format').value==='basic')$('score-lossless').checked=false;};
-$('score-portable').onclick=()=>{try{const converted=MarginWritingScore.toPortable($('score-source').value);$('score-source').value=converted.score;previewScore();$('score-messages').textContent=converted.warnings.join(' ');toast('Converted to basic writing-score notation.');}catch(error){scoreError(error);}};
+$('score-export-format').onchange=()=>{if($('score-export-format').value!=='faithful')$('score-lossless').checked=false;};
+$('score-portable').onclick=()=>{try{const converted=MarginWritingScore.toPortable($('score-source').value,{format:scoreInputFormat()});$('score-source').value=converted.score;$('score-input-format').value='webscriptlog';previewScore();$('score-messages').textContent=converted.warnings.join(' ');toast('Converted to basic writing-score notation.');}catch(error){scoreError(error);}};
 
 function setAnalysisPresentation(presentation){
  analysisPresentation=presentation;

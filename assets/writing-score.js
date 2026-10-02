@@ -13,11 +13,12 @@ function parse(source,options={}){
  if(typeof source!=='string'||source.length>MAX_SOURCE)throw Error('Score must be text of at most 2 MB.');
  const startTime=options.startTime||'2026-01-01T00:00:00.000Z',base=Date.parse(startTime);
  if(!Number.isFinite(base))throw Error('Invalid start timestamp.');
+ const webscriptlog=options.format==='webscriptlog';
  const id=options.idFactory||(()=>crypto.randomUUID()),sessionId=id(),events=[],warnings=new Set();
- let text='',start=0,end=0,direction='forward',elapsed=0,clipboard='',run=0,offset=0,rich=null;
- function emit(type,data={}){if(events.length>=LIMIT)throw Error('Score exceeds the 100,000 event limit.');const e={id:id(),sequence:events.length+1,sessionId,timestamp:new Date(base+elapsed).toISOString(),elapsedMs:elapsed,type,data:{...data,synthetic:true,scoreDerived:true}};events.push(e);return e;}
- function point(position){if(!Number.isSafeInteger(position)||position<0||position>text.length)throw Error('Cursor position '+position+' is outside the current text (length '+text.length+').');if(position>0&&position<text.length&&/[\uD800-\uDBFF]/.test(text[position-1])&&/[\uDC00-\uDFFF]/.test(text[position]))throw Error('A cursor position splits a Unicode surrogate pair.');}
- function select(a,b,backward=false,source='unknown'){point(a);point(b);if(a>b)throw Error('Selection start must precede its end.');start=a;end=b;direction=backward?'backward':'forward';emit('selection',{start:a,end:b,direction,source});}
+ let text='',start=0,end=0,direction='forward',elapsed=0,clipboard='',run=0,offset=0,rich=null,clipboardCommand=null;
+ function emit(type,data={}){if(events.length>=LIMIT)throw Error('Score exceeds the 100,000 event limit.');const e={id:id(),sequence:events.length+1,sessionId,timestamp:new Date(base+elapsed).toISOString(),elapsedMs:elapsed,type,data:{...data,synthetic:true,scoreDerived:true,scoreFormat:webscriptlog?'webscriptlog':'margin'}};events.push(e);return e;}
+ function point(position){if(!Number.isSafeInteger(position)||position<0||position>text.length)throw Error('Cursor position '+position+' is outside the current text (length '+text.length+').');if(!webscriptlog&&position>0&&position<text.length&&/[\uD800-\uDBFF]/.test(text[position-1])&&/[\uDC00-\uDFFF]/.test(text[position]))throw Error('A cursor position splits a Unicode surrogate pair.');}
+ function select(a,b,backward=false,source='unknown'){clipboardCommand=null;point(a);point(b);if(a>b)throw Error('Selection start must precede its end.');start=a;end=b;direction=backward?'backward':'forward';emit('selection',{start:a,end:b,direction,source});}
  function navigate(action,a,b,backward,modifiers=[]){
   if(a===undefined){
    const shift=modifiers.includes('SHIFT'),anchor=direction==='backward'?end:start,focus=direction==='backward'?start:end;
@@ -26,6 +27,8 @@ function parse(source,options={}){
    const next=p=>p+1<text.length&&/[\uD800-\uDBFF]/.test(text[p])&&/[\uDC00-\uDFFF]/.test(text[p+1])?p+2:Math.min(text.length,p+1);
    const lineStart=p=>p===0?0:text.lastIndexOf('\n',p-1)+1,lineEnd=p=>{const n=text.indexOf('\n',p);return n<0?text.length:n;};
    if(action==='ALL'){a=0;b=text.length;backward=false;}
+   else if(['LEFT_TO_START','UP_TO_START'].includes(action)){a=b=0;backward=false;}
+   else if(['RIGHT_TO_END','DOWN_TO_END'].includes(action)){a=b=text.length;backward=false;}
    else if(modifiers.some(m=>m!=='SHIFT')&&!['HOME','END'].includes(action))throw Error('Modified navigation needs a recorded target, e.g. <CTRL+LEFT@0:0>.');
    if(action==='LEFT')target=!shift&&start!==end?start:previous(focus);
    else if(action==='RIGHT')target=!shift&&start!==end?end:next(focus);
@@ -33,35 +36,53 @@ function parse(source,options={}){
    else if(action==='END')target=modifiers.includes('CTRL')||modifiers.includes('META')?text.length:lineEnd(focus);
    else if(action==='UP'){const from=lineStart(focus),column=focus-from;target=from===0?0:Math.min(lineStart(from-1)+column,from-1);}
    else if(action==='DOWN'){const to=lineEnd(focus),column=focus-lineStart(focus);target=to===text.length?text.length:Math.min(to+1+column,lineEnd(to+1));}
-   else if(action!=='ALL')throw Error('Page navigation needs a recorded target.');
-   if(action!=='ALL'){if(target>0&&target<text.length&&/[\uD800-\uDBFF]/.test(text[target-1])&&/[\uDC00-\uDFFF]/.test(text[target]))target--;a=shift?Math.min(anchor,target):target;b=shift?Math.max(anchor,target):target;backward=shift&&target<anchor;}
+   else if(!['ALL','LEFT_TO_START','UP_TO_START','RIGHT_TO_END','DOWN_TO_END'].includes(action))throw Error('Page navigation needs a recorded target.');
+   if(!['ALL','LEFT_TO_START','UP_TO_START','RIGHT_TO_END','DOWN_TO_END'].includes(action)){if(target>0&&target<text.length&&/[\uD800-\uDBFF]/.test(text[target-1])&&/[\uDC00-\uDFFF]/.test(text[target]))target--;a=shift?Math.min(anchor,target):target;b=shift?Math.max(anchor,target):target;backward=shift&&target<anchor;}
   }
   point(a);point(b);if(a>b)throw Error('Navigation selection start must precede its end.');
   emit('navigation',{source:'keyboard',action,modifiers,start:a,end:b,direction:backward?'backward':'forward'});
   select(a,b,backward,'keyboard');
  }
  function patch(a,count,insert,inputType,timingRun=null){point(a);point(a+count);if(typeof insert!=='string')throw Error('Inserted text must be a string.');emit('before_input',{inputType,data:insert||null,selectionStart:a,selectionEnd:a+count,isComposing:false});text=text.slice(0,a)+insert+text.slice(a+count);start=end=a+insert.length;emit('text_change',{start:a,deleteCount:count,insert,inputType,selectionStart:start,selectionEnd:end,scoreRun:timingRun});}
- function type(value){const timingRun=++run;for(const c of value)patch(start,end-start,c,c==='\n'?'insertLineBreak':'insertText',timingRun);}
- function remove(count,forward=false){if(start!==end){patch(start,end-start,'',forward?'deleteContentForward':'deleteContentBackward');return;}const available=forward?text.length-end:start;if(count>available)warnings.add('A delete ran past the text boundary and was limited to the available characters.');count=Math.min(count,available);if(count)patch(forward?start:start-count,count,'',forward?'deleteContentForward':'deleteContentBackward');}
+ function type(value){if(webscriptlog&&clipboardCommand==='PASTE'){patch(start,end-start,value,'insertFromPaste');return;}const timingRun=++run;for(const c of value)patch(start,end-start,c,c==='\n'?'insertLineBreak':'insertText',timingRun);}
+ function remove(count,forward=false){const inputType=webscriptlog&&clipboardCommand==='CUT'?'deleteByCut':forward?'deleteContentForward':'deleteContentBackward';if(start!==end){patch(start,end-start,'',inputType);return;}const available=forward?text.length-end:start;if(count>available)warnings.add('A delete ran past the text boundary and was limited to the available characters.');count=Math.min(count,available);if(count)patch(forward?start:start-count,count,'',inputType);}
  emit('session_start',{text:'',title:options.title||'Writing score',source:'writing-score'});
  const chunks=source.matchAll(/<[^<>]*>|[^<]+|</g);
  for(const match of chunks){offset=match.index;const raw=match[0];
   if(raw==='<')throw Error('Unclosed or nested token at character '+offset+'. Use <LT> for a literal <.');
   if(!raw.startsWith('<')){emit('score_token',{raw,offset});type(raw);continue;}
   const token=raw.slice(1,-1);
-  if(token.startsWith('RICH:')){if(rich)throw Error('Only one lossless archive is allowed.');rich=decode(token.slice(5));continue;}
-  if(/^\d+(?:\.\d+)?$/.test(token)){const ms=Number(token)*1000;if(!Number.isFinite(ms)||ms>31536000000)throw Error('Pause is outside the supported range at character '+offset+'.');if(Math.abs(ms-Math.round(ms))>0.000001)warnings.add('Pauses finer than one millisecond were rounded in the rich log; original tokens are retained.');elapsed+=Math.round(ms);if(elapsed>31536000000)throw Error('Session exceeds one year.');emit('score_token',{raw,offset,pauseMs:ms});continue;}
-  if(/^-\d|^NaN$|^Infinity$/.test(token))throw Error('Invalid pause at character '+offset+'.');
+  if(!webscriptlog&&token.startsWith('RICH:')){if(rich)throw Error('Only one lossless archive is allowed.');rich=decode(token.slice(5));continue;}
+  if(/^\d+(?:\.\d+)?$/.test(token)&&(!webscriptlog||/^\d+(?:\.\d{1,3})?$/.test(token))){const ms=Number(token)*1000;if(!Number.isFinite(ms)||ms>31536000000)throw Error('Pause is outside the supported range at character '+offset+'.');if(Math.abs(ms-Math.round(ms))>0.000001)warnings.add('Pauses finer than one millisecond were rounded in the rich log; original tokens are retained.');clipboardCommand=null;elapsed+=Math.round(ms);if(elapsed>31536000000)throw Error('Session exceeds one year.');emit('score_token',{raw,offset,pauseMs:ms});continue;}
+  if(!webscriptlog&&/^-\d|^NaN$|^Infinity$/.test(token))throw Error('Invalid pause at character '+offset+'.');
   emit('score_token',{raw,offset});
+  if(webscriptlog){
+   let w;
+   if((w=/^(NAV\d+|SEL\d+:\d+)$/.exec(token))){const positions=token.slice(3).split(':').map(Number),a=positions[0],b=positions[1]??a;select(Math.min(a,b),Math.max(a,b),a>b);continue;}
+   if((w=/^(DEL|FDEL)(\d*)$/.exec(token))){const count=Number(w[2]||1);if(!Number.isSafeInteger(count)||count<1)throw Error('Delete count must be a positive integer.');const available=text.length+1;for(let n=0;n<Math.min(count,available);n++)remove(1,w[1]==='FDEL');continue;}
+   if((w=/^(LEFT|RIGHT|UP|DOWN|SLEFT|SRIGHT|SUP|SDOWN)(\d*)$/.exec(token))){const count=Number(w[2]||1);if(!Number.isSafeInteger(count)||count<1)throw Error('Navigation count must be positive.');const shift=w[1].startsWith('S'),action=shift?w[1].slice(1):w[1],anchor=direction==='backward'?end:start,focus=direction==='backward'?start:end;let target=focus;
+    if(action==='LEFT')target=shift?Math.max(0,focus-count):start!==end?Math.max(0,start-count+1):Math.max(0,start-count);
+    if(action==='RIGHT')target=shift?Math.min(text.length,focus+count):start!==end?Math.min(text.length,end+count-1):Math.min(text.length,end+count);
+    if(!shift&&(action==='UP'||action==='DOWN'))navigate(action,start,end,direction==='backward');else navigate(action,shift?Math.min(anchor,target):target,shift?Math.max(anchor,target):target,shift&&target<anchor,shift?['SHIFT']:[]);continue;
+   }
+   if(['HOME','END','LEFT_TO_START','RIGHT_TO_END','UP_TO_START','DOWN_TO_END'].includes(token)){const target=['HOME','LEFT_TO_START','UP_TO_START'].includes(token)?0:text.length;navigate(token,target,target,false);continue;}
+   if((w=/^BDEL(\d+):(\d+)$/.exec(token))){const cursor=end,a=Math.max(0,cursor-Number(w[1])),b=Math.min(text.length,cursor+Number(w[2]));patch(a,b-a,'','deleteSurroundingText');continue;}
+   if(['COPY','CUT','PASTE'].includes(token)){clipboardCommand=token;emit(token.toLowerCase(),{selectionStart:start,selectionEnd:end,selectedText:text.slice(start,end),markerOnly:true});continue;}
+   if(token==='SELECTALL'||/^(UNDO|REDO)(\d*|\*)$/.test(token)||token.startsWith('KEY:')){clipboardCommand=null;emit('score_marker',{command:token,selectionStart:start,selectionEnd:end});continue;}
+   if(token==='ENTER'){type('\n');continue;}
+   if(token==='LT'||token==='GT'){type(token==='LT'?'<':'>');continue;}
+   if(!/^CLICK\d+$/.test(token)){warnings.add('WebScriptLog treats unrecognised tokens as literal text: '+raw);type(raw);continue;}
+  }
   if(token==='ENTER'){type('\n');continue;}
   if(token==='TAB'){type('\t');continue;}
   if(token==='LT'||token==='GT'){type(token==='LT'?'<':'>');continue;}
   let m;
+  if(token.startsWith('KEY:')){emit('score_marker',{command:token.slice(4),selectionStart:start,selectionEnd:end});continue;}
   if((m=/^(DEL|FWD)(\d*)$/.exec(token))){const count=Number(m[2]||1);if(!Number.isSafeInteger(count)||count<1)throw Error('Delete count must be a positive integer.');remove(count,m[1]==='FWD');continue;}
   if((m=/^(CLICK|TAP)(\d+)(?::(\d+))?(?::(B))?$/.exec(token))){const a=Number(m[2]),b=m[3]===undefined?a:Number(m[3]);point(a);point(b);if(a>b)throw Error('Selection start must precede its end.');emit('navigation',{source:m[1]==='TAP'?'touch':'pointer',start:a,end:b,direction:m[4]?'backward':'forward'});select(a,b,!!m[4],m[1]==='TAP'?'touch':'pointer');continue;}
   if((m=/^MOVE(\d+)$/.exec(token))){select(Number(m[1]),Number(m[1]));continue;}
   if((m=/^SELECT(\d+):(\d+)(?::(B))?$/.exec(token))){select(Number(m[1]),Number(m[2]),!!m[3]);continue;}
-  if((m=/^((?:(?:SHIFT|CTRL|META|ALT)\+)*)(LEFT|RIGHT|UP|DOWN|HOME|END|PAGEUP|PAGEDOWN|ALL)(?:@(\d+):(\d+)(?::(B))?)?$/.exec(token))){navigate(m[2],m[3]===undefined?undefined:Number(m[3]),m[4]===undefined?undefined:Number(m[4]),!!m[5],m[1].split('+').filter(Boolean));continue;}
+  if((m=/^((?:(?:SHIFT|CTRL|META|ALT)\+)*)(LEFT_TO_START|RIGHT_TO_END|UP_TO_START|DOWN_TO_END|LEFT|RIGHT|UP|DOWN|HOME|END|PAGEUP|PAGEDOWN|ALL)(?:@(\d+):(\d+)(?::(B))?)?$/.exec(token))){navigate(m[2],m[3]===undefined?undefined:Number(m[3]),m[4]===undefined?undefined:Number(m[4]),!!m[5],m[1].split('+').filter(Boolean));continue;}
   if(token==='COPY'||token==='CUT'){clipboard=text.slice(start,end);emit(token.toLowerCase(),{selectionStart:start,selectionEnd:end,selectedText:clipboard});if(token==='CUT' && start!==end)patch(start,end-start,'','deleteByCut');continue;}
   if(token==='PASTE'){emit('paste',{selectionStart:start,selectionEnd:end});patch(start,end-start,clipboard,'insertFromPaste');continue;}
   if((m=/^(TEXT|PASTE|BASE|PATCH|CLIP|CUT):(.+)$/.exec(token))){const value=decode(m[2]);
@@ -82,17 +103,17 @@ function parse(source,options={}){
   if(text!==rich.document.text)throw Error('The compact score and lossless archive disagree about the final text.');
   return {text:rich.document.text,cursor:start,elapsedMs:elapsed,events:structuredClone(rich.document.events),warnings:[...warnings],document:structuredClone(rich.document),lossless:true};
  }
- return {text,cursor:start,elapsedMs:elapsed,events,warnings:[...warnings],lossless:false};
+ return {text,cursor:webscriptlog?end:start,elapsedMs:elapsed,events,warnings:[...warnings],lossless:false,format:webscriptlog?'webscriptlog':'margin'};
 }
 function validateEvents(events){const ids=new Set();for(const e of events){if(!e||typeof e.id!=='string'||ids.has(e.id)||typeof e.sessionId!=='string'||typeof e.type!=='string'||!Number.isInteger(e.sequence)||!Number.isFinite(e.elapsedMs)||e.elapsedMs<0||!Number.isFinite(Date.parse(e.timestamp))||!e.data||typeof e.data!=='object'||Array.isArray(e.data)&&e.data.length>0)throw Error('Invalid event in lossless archive.');ids.add(e.id);}}
 // Lower semantic edits to the original notation. Selections and clipboard operations
 // become explicit cursor moves, backward deletions, and literal insertions.
-function toPortable(source){
- const parsed=parse(source),warnings=new Set(parsed.warnings);
+function toPortable(source,options={}){
+ const parsed=parse(source,options),warnings=new Set(parsed.warnings);
  if(parsed.lossless)throw Error('A lossless archive is not a portable score. Export without the archive to make a basic score.');
  const basic=/^(?:\d+(?:\.\d+)?|ENTER|DEL\d*|CLICK\d+)$/;
  const tokens=Array.from(source.matchAll(/<([^<>]*)>/g));
- if(tokens.every(m=>basic.test(m[1])))return {score:source,warnings:[...warnings],portable:true};
+ if(tokens.every(m=>basic.test(m[1])))return {score:source,warnings:[...warnings],portable:true,format:'basic'};
  warnings.add('Basic compatibility output may synthesize CLICK positioning and expand selections or clipboard actions. Use faithful notation to represent user actions.');
  const out=[];let text='',cursor=0,lastMs=0;
  function wait(e){const delta=e.elapsedMs-lastMs;if(delta>0)out.push('<'+String(delta/1000)+'>');lastMs=e.elapsedMs;}
@@ -110,9 +131,65 @@ function toPortable(source){
  if(text!==parsed.text)throw Error('Portable conversion failed to reconstruct the original text.');
  const score=out.join('');if(score.length>MAX_SOURCE)throw Error('Portable score exceeds the 2 MB limit.');
  if(parse(score).text!==parsed.text)throw Error('Portable score failed validation.');
- return {score,warnings:[...warnings],portable:true};
+ return {score,warnings:[...warnings],portable:true,format:'basic'};
 }
 const navigationKeys={ArrowLeft:'LEFT',ArrowRight:'RIGHT',ArrowUp:'UP',ArrowDown:'DOWN',Home:'HOME',End:'END',PageUp:'PAGEUP',PageDown:'PAGEDOWN'};
+// WebScriptLog's tool commands are markers; the following tokens carry their effects.
+function toWebScriptLog(source){
+ const parsed=parse(source);if(parsed.lossless)throw Error('WebScriptLog scores cannot contain a Margin archive. Export the log separately.');
+ const out=[],warnings=new Set(parsed.warnings);let text='',start=0,end=0,anchor=0,focus=0,lastMs=0;
+ const count=(name,n)=>'<'+name+(n===1?'':n)+'>';
+ const encoded=value=>value.replace(/[<>\n]/g,c=>({'<':'<LT>','>':'<GT>','\n':'<ENTER>'}[c]));
+ function wait(e){const delta=e.elapsedMs-lastMs;if(delta>0)out.push('<'+(delta/1000).toFixed(3).replace(/0+$/,'').replace(/\.$/,'')+'>');lastMs=e.elapsedMs;}
+ function state(a,b,backward=false){start=a;end=b;anchor=backward?b:a;focus=backward?a:b;}
+ function resolve(a,b=a,backward=false,force=false){if(!force&&start===a&&end===b&&(a===b||focus===(backward?a:b)))return;if(a===b)out.push('<NAV'+a+'>');else out.push('<SEL'+(backward?b:a)+':'+(backward?a:b)+'>');state(a,b,backward);}
+ function insert(value){out.push(encoded(value));text=text.slice(0,start)+value+text.slice(end);state(start+value.length,start+value.length);}
+ function edit(d){
+  const a=d.start,b=a+d.deleteCount,value=d.insert,selected=start===a&&end===b&&start!==end;
+  if(value&&selected){insert(value);return;}
+  if(d.deleteCount){
+   if(selected){out.push('<DEL>');text=text.slice(0,a)+text.slice(b);state(a,a);}
+   else if(start===end&&end===b){out.push(count('DEL',d.deleteCount));text=text.slice(0,a)+text.slice(b);state(a,a);}
+   else if(start===end&&start===a){out.push(count('FDEL',d.deleteCount));text=text.slice(0,a)+text.slice(b);state(a,a);}
+   else{resolve(a,b);out.push('<DEL>');text=text.slice(0,a)+text.slice(b);state(a,a);warnings.add('NAV/SEL resolve an edit range missing from the log; they are state metadata, not invented clicks.');}
+  }else if(start!==a||end!==a){resolve(a);warnings.add('NAV resolves an edit position missing from the log; it does not claim a click.');}
+  if(value)insert(value);
+ }
+ function key(d){
+  const action=navigationKeys[d.key]||d.action,mods=d.modifiers||[],shift=mods.includes('SHIFT'),other=mods.filter(m=>m!=='SHIFT');let token;
+  if(action==='ALL')token='SELECTALL';
+  else if(!other.length&&['LEFT','RIGHT','UP','DOWN'].includes(action))token=(shift?'S':'')+action;
+  else if(!mods.length&&['HOME','END','LEFT_TO_START','RIGHT_TO_END','UP_TO_START','DOWN_TO_END'].includes(action))token=action;
+  else token='KEY:'+[...mods,action||'Navigation'].join('+');
+  out.push('<'+token+'>');
+  if(token==='LEFT')state(start!==end?start:Math.max(0,start-1),start!==end?start:Math.max(0,start-1));
+  else if(token==='RIGHT')state(start!==end?end:Math.min(text.length,end+1),start!==end?end:Math.min(text.length,end+1));
+  else if(token==='SLEFT'||token==='SRIGHT'){const target=token==='SLEFT'?Math.max(0,focus-1):Math.min(text.length,focus+1),fixed=anchor;state(Math.min(fixed,target),Math.max(fixed,target),target<fixed);}
+  else if(['HOME','LEFT_TO_START','UP_TO_START'].includes(token))state(0,0);
+  else if(['END','RIGHT_TO_END','DOWN_TO_END'].includes(token))state(text.length,text.length);
+  resolve(d.start,d.end,d.direction==='backward');
+ }
+ for(const e of parsed.events){const d=e.data;
+  if(e.type==='score_token'){if(d.pauseMs!==undefined)wait(e);continue;}
+  if(e.type==='navigation'){
+   wait(e);if(d.source==='pointer'||d.source==='touch'){if(d.start===d.end){out.push('<CLICK'+d.start+'>');state(d.start,d.end);}else resolve(d.start,d.end,d.direction==='backward',true);if(d.source==='touch')warnings.add('WebScriptLog represents clicks and taps as the same pointer action.');}
+   else key(d);continue;
+  }
+  if(e.type==='selection'){wait(e);resolve(d.start,d.end,d.direction==='backward');continue;}
+  if(['copy','cut','paste'].includes(e.type)){wait(e);out.push('<'+e.type.toUpperCase()+'>');continue;}
+  if(e.type==='score_marker'){wait(e);const command=d.command.replace(/^KEY:/,'');out.push(/^(COPY|CUT|PASTE|SELECTALL|UNDO\d*|REDO\d*)$/.test(command)?'<'+command+'>':'<KEY:'+command+'>');continue;}
+  if(e.type==='text_change'){
+   wait(e);if(d.inputType==='historyUndo')out.push('<UNDO>');else if(d.inputType==='historyRedo')out.push('<REDO>');
+   else if(!['insertText','insertLineBreak','deleteContentBackward','deleteContentForward','deleteByCut','insertFromPaste'].includes(d.inputType))out.push('<KEY:'+String(d.inputType).replace(/[<>]/g,'')+'>');
+   edit(d);continue;
+  }
+  if(['session_start','document_open'].includes(e.type)&&typeof d.text==='string'&&d.text!==text){wait(e);out.push('<KEY:Snapshot>');edit({start:0,deleteCount:text.length,insert:d.text});warnings.add('WebScriptLog has no snapshot token; KEY:Snapshot labels the explicit text effect.');}
+  if(e.type==='score_unknown')warnings.add('Unsupported Margin markers are omitted from WebScriptLog output.');
+ }
+ const score=out.join('');if(score.length>MAX_SOURCE)throw Error('WebScriptLog score exceeds the 2 MB limit.');
+ const checked=parse(score,{format:'webscriptlog'});if(checked.text!==parsed.text||checked.elapsedMs!==parsed.elapsedMs)throw Error('WebScriptLog conversion failed text or timing validation.');
+ return {score,warnings:[...warnings],format:'webscriptlog',portable:false,faithful:true,lossless:false};
+}
 function exportFaithful(document,options={}){
  const events=document.events||[];validateEvents(events);
  const out=[],warnings=new Set();let text='',start=0,end=0,selectionDirection='forward',pendingSelection=null,last=null,pendingCut=null,lastNavigation=null;
@@ -131,8 +208,10 @@ function exportFaithful(document,options={}){
  function followedByNavigation(i,r){for(let j=i+1;j<events.length;j++){const next=events[j];if(next.sessionId!==events[i].sessionId||next.elapsedMs-events[i].elapsedMs>150||next.type==='text_change'||typeof next.data.text==='string')break;if(next.type==='navigation'||isKeyboard(next)){const target=range(next.data);return target.start===r.start&&target.end===r.end;}}return false;}
  for(let i=0;i<events.length;i++){
   const e=events[i],d=e.data||{};
-  if(e.type==='score_token'){out.push(d.raw);last=e;continue;}
-  if(d.scoreDerived){if(e.type==='text_change'){text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;}if(e.type==='selection'){start=d.start;end=d.end;selectionDirection=d.direction||'forward';}if(['session_start','document_open'].includes(e.type)&&typeof d.text==='string'){text=d.text;start=end=text.length;}continue;}
+  if(e.type==='score_token'){if(d.scoreFormat!=='webscriptlog'||d.pauseMs!==undefined){out.push(d.raw);last=e;}continue;}
+  if(d.scoreDerived&&d.scoreFormat!=='webscriptlog'){if(e.type==='text_change'){text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;}if(e.type==='selection'){start=d.start;end=d.end;selectionDirection=d.direction||'forward';}if(['session_start','document_open'].includes(e.type)&&typeof d.text==='string'){text=d.text;start=end=text.length;}continue;}
+  if(e.type==='score_marker'){wait(e);out.push('<KEY:'+d.command.replace(/^KEY:/,'')+'>');continue;}
+  if(d.markerOnly&&['copy','cut','paste'].includes(e.type)){wait(e);out.push('<KEY:'+e.type.toUpperCase()+'>');continue;}
   if(e.type==='keydown'&&d.element==='editor'){lastNavigation=null;continue;}
   if(e.type==='navigation'){navigation(e);continue;}
   if(isKeyboard(e)){const r=range(d);if(lastNavigation?.key===d.key&&matches(r))continue;navigation({...e,data:{...d,source:'keyboard'}});continue;}
@@ -153,7 +232,8 @@ function exportFaithful(document,options={}){
    wait(e);
    const selected=start!==end&&d.start===start&&d.deleteCount===end-start;
    const backwardDelete=/^delete(?:Content|Word|SoftLine|HardLine)Backward$/.test(d.inputType),forwardDelete=/^delete(?:Content|Word|SoftLine|HardLine)Forward$/.test(d.inputType);
-   if(d.insert&&(selected||start===end&&d.start===start&&!d.deleteCount)&&['insertText','insertLineBreak','insertParagraph','insertFromPaste'].includes(d.inputType))out.push(d.inputType==='insertFromPaste'?payload('PASTE',d.insert):escapeText(d.insert));
+   if(d.scoreFormat==='webscriptlog'&&d.inputType==='insertFromPaste')out.push(payload('PATCH',{start:d.start,deleteCount:d.deleteCount,insert:d.insert,inputType:d.inputType}));
+   else if(d.insert&&(selected||start===end&&d.start===start&&!d.deleteCount)&&['insertText','insertLineBreak','insertParagraph','insertFromPaste'].includes(d.inputType))out.push(d.inputType==='insertFromPaste'?payload('PASTE',d.insert):escapeText(d.insert));
    else if(!d.insert&&d.deleteCount&&(backwardDelete||forwardDelete)&&(selected||start===end&&(forwardDelete?d.start===start:d.start+d.deleteCount===start)))out.push('<'+(forwardDelete?'FWD':'DEL')+(selected||d.deleteCount===1?'':d.deleteCount)+'>');
    else{out.push(payload('PATCH',{start:d.start,deleteCount:d.deleteCount,insert:d.insert,inputType:d.inputType||'insertReplacementText'}));if(!selected&&d.start!==start&&d.start+d.deleteCount!==start)warnings.add('An edit has no matching recorded navigation. PATCH preserves the edit without inventing a cursor action.');}
    text=text.slice(0,d.start)+d.insert+text.slice(d.start+d.deleteCount);start=end=d.start+d.insert.length;continue;
@@ -167,14 +247,16 @@ function exportFaithful(document,options={}){
  if(options.lossless)out.push(payload('RICH',{version:1,document}));
  const score=out.join('');if(score.length>MAX_SOURCE)throw Error('This score exceeds the 2 MB import limit.');
  if(parse(score).text!==document.text)throw Error('Faithful score failed final-text validation.');
- return {score,warnings:[...warnings],lossless:!!options.lossless,portable:false,faithful:true};
+ return {score,warnings:[...warnings],lossless:!!options.lossless,portable:false,faithful:true,format:'margin'};
 }
 function exportScore(document,options={}){
+ if(options.format==='webscriptlog'&&options.lossless)throw Error('Choose Margin archive notation for a lossless archive.');
  const faithful=exportFaithful(document,options);
+ if(options.format==='webscriptlog'){const converted=toWebScriptLog(faithful.score);return {...converted,warnings:[...new Set([...faithful.warnings,...converted.warnings])]};}
  if(!options.portable)return faithful;
  if(options.lossless)throw Error('Lossless archives require faithful notation.');
  const portable=toPortable(faithful.score);
- return {...portable,warnings:[...new Set([...faithful.warnings,...portable.warnings])],lossless:false,faithful:false};
+ return {...portable,warnings:[...new Set([...faithful.warnings,...portable.warnings])],lossless:false,faithful:false,format:'basic'};
 }
 function generate(target,options={}){
  if(typeof target!=='string'||!target.length||target.length>5000)throw Error('Target text must contain 1–5,000 characters.');
@@ -204,9 +286,9 @@ function generate(target,options={}){
  if(text!==target)throw Error('Generator did not reconstruct its target.');
  const generated=score.join(''),result=parse(generated);
  if(result.text!==target)throw Error('Generated score failed validation.');
- const output=options.extended?{score:generated,warnings:[]}:toPortable(generated);
+ const output=options.format==='webscriptlog'?toWebScriptLog(generated):options.extended?{score:generated,warnings:[]}:toPortable(generated);
  return {...output,expectedText:target,seed,edits,durationMs:result.elapsedMs,extended:!!options.extended};
 }
-root.MarginWritingScore={parse,exportScore,generate,toPortable,encode,payload,sample,sampleText};
+root.MarginWritingScore={parse,exportScore,generate,toPortable,toWebScriptLog,encode,payload,sample,sampleText};
 if(typeof module!=='undefined')module.exports=root.MarginWritingScore;
 })(typeof globalThis!=='undefined'?globalThis:window);

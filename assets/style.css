@@ -13,3 +13,5 @@
 #replay-text{position:relative;overflow-wrap:anywhere}.replay-selection{background:#c9ddb8;color:inherit;border-radius:2px}.replay-caret{display:inline-block;width:0;height:1.15em;border-left:2px solid #456650;vertical-align:text-bottom;pointer-events:none}
 
 .score-export>label:not(.score-checkbox){display:block;font-size:11px;color:#7f8979;margin:12px 0 6px}.score-export select{width:100%;border:1px solid #dce0d4;border-radius:6px;padding:9px;background:#fffefa;color:var(--ink);font-size:12px}
+
+.score-inputs select{width:100%;border:1px solid #dce0d4;border-radius:6px;padding:10px;background:#fffefa;color:var(--ink);font-size:12px}

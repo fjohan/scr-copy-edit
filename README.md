@@ -59,64 +59,57 @@ node tests/app-integration.test.cjs
 
 ## Writing scores and synthetic test data
 
-Open **Writing score** to paste a linear representation, preview the reconstructed text, and create a separate test document. Imports include a final checkpoint for word analysis and a log for replay. Existing documents are never overwritten. **Load example** loads the supplied example; its exact final text includes two trailing newlines. The optional expected-text field compares the complete string, including whitespace, before import.
+Open **Writing score** to paste a linear representation, preview its reconstructed text, and create a separate test document with a checkpoint and replay log. Existing documents are not overwritten. **Load example** uses the supplied score; its exact final text includes two trailing newlines. The expected-text field compares all text, including whitespace.
 
-For automatic test data, enter a target in **Expected final text / generator target**, choose a seed and an edit-pass count, then click **Generate score**. The same target, seed, and count produce the same score. Generation types the target with per-character delays, introduces/corrects suffix errors, copies temporary passages, and moves original words out and back. **Generate faithful notation** is checked by default in the UI and preserves selections and clipboard actions. Uncheck it for basic compatibility with other renderers. Each generated score is parsed again to verify its final text. Targets are limited to 5,000 UTF-16 units and edit passes to 50.
+**WebScriptLog linear** is the default input and export notation in the UI. It matches the parser and reconstruction functions in `/data/html/wscr/webscriptlog/panes/linear/webscriptlog_linear.js`. Select **Margin archive notation** to read older Margin scores containing SELECT, MOVE, TAP, FWD, resolved `@` navigation, encoded PATCH/BASE payloads, or a RICH archive. These are different dialects: WebScriptLog treats unknown command strings as literal prose, so pasting a Margin score directly into it can corrupt the rendered text.
 
-**Faithful actions** is the default document export format. Typing advances the simulated caret, backspace moves it backward, and replacing a selection collapses it after the insertion. These effects do not produce extra cursor actions. Recorded keyboard navigation retains its key and modifiers; recorded pointer actions retain click/tap provenance. A resolved target after `@` preserves the observed position without pretending that a keypress was a click. New logs capture navigation outcomes after the browser handles keyboard and pointer events, including repeated navigation keys. Older logs can sometimes identify keys from editor keyup events; otherwise MOVE/SELECT preserve recorded positions with an explicit unknown-cause warning. An edit whose cursor context is missing is represented as PATCH, not preceded by an invented click. Browser/OS behavior and recording gaps still limit action recovery from older logs.
+WebScriptLog scores track the cursor through typing and deletion automatically. Recorded pointer actions produce CLICK; inferred or resolved positions use NAV/SEL, not invented clicks. Navigation keys retain their action token and, where needed, an explicit NAV/SEL resolution. For example, an observed upward move to offset 12 becomes `<UP><NAV12>` because the target renderer records UP but does not calculate visual line movement. Its HOME/END commands mean document start/end; a line-level Home key can therefore need a following NAV resolution.
 
-**Basic compatibility** and **Make portable** are explicit alternatives for simple renderers that understand only pauses, literal typing, DEL, CLICK, and ENTER. They preserve final text and timing but may synthesize positioning clicks, expand selections into deletions, and lose clipboard/navigation provenance. They should not be interpreted as faithful action transcripts.
-
-Syntax:
-
-| Score | Effect |
+| WebScriptLog score | Meaning |
 | --- | --- |
-| `<2.329>` | Advance the simulated clock by 2.329 seconds |
-| `Hello` | Insert a run of characters at the cursor, replacing any selection |
-| `<DEL>` / `<DEL3>` | Backspace one / three UTF-16 units; a selected range is deleted as a whole |
-| `<CLICK31>` / `<TAP31>` | Recorded click / tap at zero-based UTF-16 offset 31 |
-| `<CLICK2:8:B>` / `<TAP2:8>` | Pointer selection; B marks a backward active end |
-| `<LEFT>` / `<RIGHT>` | Move one Unicode code point or collapse a selection |
-| `<UP>` / `<DOWN>` | Move between logical newline-separated lines at the current column |
-| `<HOME>` / `<END>` | Move to the logical line start / end |
-| `<SHIFT+LEFT>` | Extend the selection one code point to the left |
-| `<CTRL+HOME>` / `<CTRL+END>` | Move to document start / end (SHIFT can extend) |
-| `<UP@12:12>` / `<SHIFT+LEFT@2:8:B>` | Recorded key and resolved range; preserves actual browser wrapping/navigation |
-| `<CTRL+ALL>` | Select all text |
-| `<PAGEUP@0:0>` / `<PAGEDOWN@31:31>` | Page navigation with its recorded destination |
-| `<MOVE31>` / `<SELECT2:8:B>` | Recorded position/selection whose action cause is unknown |
-| `<ENTER>` / `<TAB>` | Insert newline / tab |
-| `<SELECT2:8>` | Select the half-open range from 2 to 8 |
-| `<FWD>` / `<FWD3>` | Delete forward one / three units |
-| `<COPY>` | Capture the selected text into the simulated clipboard |
-| `<CUT>` | Capture and delete the selected text |
-| `<PASTE>` | Paste the simulated clipboard |
-| `<LT>` / `<GT>` | Type a literal angle bracket |
+| `<2.329>` | Pause in seconds, with up to three decimal places |
+| `Hello` | Insert text at the cursor, replacing a selection |
+| `<ENTER>` | Insert newline |
+| `<LT>` / `<GT>` | Insert literal angle brackets; tabs are literal tab characters |
+| `<DEL>` / `<DEL3>` | One / three backward deletion effects |
+| `<FDEL>` / `<FDEL3>` | One / three forward deletion effects |
+| `<CLICK31>` | Recorded pointer action at UTF-16 offset 31; the target does not distinguish taps |
+| `<SEL2:8>` / `<SEL8:2>` | Selection with anchor/focus endpoints; reversed endpoints preserve backward direction |
+| `<NAV31>` | Cursor state resolution, without claiming a click |
+| `<LEFT>` / `<RIGHT>` | Arrow movement by one UTF-16 unit; counts such as LEFT3 are supported |
+| `<SLEFT>` / `<SRIGHT>` | Shift + arrow selection movement |
+| `<UP>` / `<DOWN>` / `<SUP>` / `<SDOWN>` | Navigation markers; observed destinations require NAV/SEL |
+| `<HOME>` / `<END>` | Document start / end in the target renderer |
+| `<LEFT_TO_START>` / `<RIGHT_TO_END>` | Move to document boundaries |
+| `<COPY>` / `<CUT>` / `<PASTE>` | Clipboard action markers, followed by explicit effects |
+| `<UNDO>` / `<REDO>` / `<SELECTALL>` | Action markers, followed by explicit effects or state resolution |
+| `<KEY:Control+LEFT>` | Metadata for a key/chord the target cannot otherwise express |
 
-Authored UP/DOWN/HOME/END use logical lines, not browser visual wrapping. Recorded navigation includes its resolved range after @; modified word navigation and page navigation require resolved targets because their behavior depends on platform/layout. Unicode characters are typed as whole code points. Cursor/delete operations that split surrogate pairs are rejected. Out-of-range cursor positions and malformed directives are errors; overlong backspaces clamp to the text boundary with a warning. Unknown tokens are preserved as log markers and reported as having no simulated effect.
+The target's clipboard commands do not themselves change text. For example, `cat<SEL0:3><CUT><DEL>dog<PASTE>cat` reconstructs `dogcat`. Selected replacement by inserted text needs no extra deletion command. Counted deletions follow the target's repeated-effect semantics: DEL3 on a selection removes that selection, then deletes two more units to its left.
 
-Typed characters produce synthetic `before_input` and `text_change` events with the same event structure used by the editor; cursor and clipboard actions produce corresponding semantic events. No physical keyboard, focus, or scroll activity is invented. All synthetic events are explicitly marked. A plain run such as `Hello` supplies no timing between its letters: word analysis marks intervals inside that run as unknown, rather than assuming zero. Explicit pauses between runs are measured, and the initial score delay is available as the first word's before-pause. Rich-log clocks use millisecond resolution; finer pause values are rounded with a warning while the original score tokens remain intact. Imported simulated sessions end at import time so subsequent real writing belongs to a new session.
+Margin snapshots and bulk edits become explicit text effects with markers where possible; KEY:Snapshot identifies initial/restored text rather than claiming it was typed. Conversion warns when it loses metadata. TAP versus mouse click, full input types, snapshots, and exact clipboard batch boundaries cannot all be represented by the target's grammar. Use the full JSON process log or **Include lossless log archive** for complete information; archives require **Margin archive notation** and are not compatible WebScriptLog scores.
 
-**Load its score** / **Download score** export the active document in the selected format. Faithful export validates that the score reconstructs the final text. Encoded operations handle edits outside ordinary typing: `BASE` stores an existing-text snapshot; `PATCH` stores a replacement/bulk/undo input with its input type and exact range; `CLIP` captures a clipboard source; `TEXT`, `CUT`, and `PASTE` carry arbitrary data. Payloads are base64url-encoded UTF-8 JSON. Original imported score tokens roundtrip exactly, including unsupported tokens and trailing pauses. Non-text interface events and full metadata remain in the rich log/archive. Basic compatibility cannot safely encode literal angle brackets and refuses those cases.
+**Basic compatibility** and **Make portable** remain available for older renderers that understand only pauses, literal text, DEL, ENTER, and CLICK. This option can synthesize positioning clicks and expand clipboard/selection operations. Use WebScriptLog linear for the referenced renderer instead.
 
-Select **Include lossless log archive** to use faithful notation and append a `RICH` extension containing the entire document. Parsing this preserves event details, identities, timestamps, comments, revisions, and metadata exactly, and verifies that the visible score reconstructs the archive's final text. Creating a document from an archive deliberately forks it: document, event, session, and revision IDs are remapped to prevent collisions; original identities remain as metadata. The UI appends a final checkpoint to the new copy. This archive can be much larger than the compact score. All score inputs are capped at 2 million characters and 100,000 simulated events.
+For automatic test data, enter a target in **Expected final text / generator target**, choose a seed and edit-pass count, then click **Generate score**. With **Include selections and clipboard actions** checked, generated scores use WebScriptLog notation. Uncheck it for basic compatibility. Generation types the target with per-character delays, introduces and corrects suffix errors, copies temporary passages, and moves original words out and back. The same target, seed and count produce the same score. Targets are limited to 5,000 UTF-16 units and edit passes to 50; inputs are capped at 2 million characters and 100,000 simulated events.
 
-The codec and generator are also available without the UI:
+The module's existing API defaults still use Margin notation; explicitly request WebScriptLog notation to match the UI:
 
 ```js
 const score = require('./assets/writing-score.js');
-const generated = score.generate('A final draft.', { seed: 'study-1', edits: 5, extended: true });
-const session = score.parse(generated.score);
-// session.text, session.events, session.elapsedMs, session.warnings
-const compact = score.exportScore(document); // faithful actions
-const basic = score.exportScore(document, { portable: true });
-const portable = score.toPortable(existingExtendedScore);
+const generated = score.generate('A final draft.', {
+  seed: 'study-1', edits: 5, format: 'webscriptlog'
+});
+const session = score.parse(generated.score, { format: 'webscriptlog' });
+const compatible = score.exportScore(document, { format: 'webscriptlog' });
 const archive = score.exportScore(document, { lossless: true });
+const converted = score.toWebScriptLog(existingMarginScore);
 ```
 
-Additional validation includes the supplied example, compact and lossless roundtrips, edit timing, cursor/deletion bounds, Unicode, copying/moving, 100 generated sessions with different seeds, another 100 sessions rendered by an independent basic-only renderer against the ten-sentence regression text, and UI import/generation/export integration:
+Compatibility tests execute the actual WebScriptLog parser, text reconstruction, and both synthetic-log builders when that project is available. A verbatim snapshot of its core reference functions is included for other environments. Tests verify recognised tokens, final text, UTF-16 behavior, selections, clipboard effects, navigation, snapshots, angle brackets, pauses, import/export with subsequent live edits, and 50 generated sessions. Its synthetic-log builders assign their own default timing to unpaused character runs; compatible scores do not override that behavior.
 
 ```sh
+node tests/webscriptlog-score.test.cjs
 node tests/writing-score.test.cjs
 node tests/faithful-score.test.cjs
 node tests/app-integration.test.cjs

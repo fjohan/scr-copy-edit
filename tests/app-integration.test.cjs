@@ -50,7 +50,7 @@ test('Editor events, checkpoint capture, analysis tab, and JSON export work toge
  replayEditor.setSelectionRange(1,1);pendingTimers.get(0)();
  if(doc().events.at(-1).data.source!=='touch')throw Error('Tap provenance missing');
  const faithfulExport=currentScore();
- if(!faithfulExport.score.includes('<SHIFT+LEFT@0:2>')||!faithfulExport.score.includes('<TAP1>')||faithfulExport.score.includes('<CLICK'))throw Error('Faithful export invented clicks or lost navigation');
+ if(faithfulExport.format!=='webscriptlog'||!faithfulExport.score.includes('<SLEFT>')||!faithfulExport.score.includes('<CLICK1>')||(faithfulExport.score.match(/<CLICK/g)||[]).length!==1)throw Error('WebScriptLog export invented clicks or lost navigation');
  $('score-export-format').value='basic';$('score-export-format').onchange();
  if(!currentScore().portable)throw Error('Basic compatibility export missing');
  $('score-lossless').checked=true;$('score-lossless').onchange();
@@ -89,7 +89,7 @@ test('Editor events, checkpoint capture, analysis tab, and JSON export work toge
  $('score-import').onclick();
  if(doc().text!=='A new target text.' || doc().writingScore.seed!=='integration')throw Error('Generated import provenance missing');
  setView('score');$('score-extended').checked=true;$('score-generate').onclick();
- if(!/<SELECT/.test($('score-source').value))throw Error('Explicit extended mode missing');
+ if(!/<SEL/.test($('score-source').value)||$('score-input-format').value!=='webscriptlog')throw Error('WebScriptLog generation missing');
  $('score-portable').onclick();if(/<(SELECT|COPY|CUT|PASTE)/.test($('score-source').value))throw Error('Portable conversion leaked extensions');
  if($('score-validation').textContent!=='Exact text match')throw Error('Portable UI conversion mismatch');
  $('document-search').value='nonexistent-title';$('document-search').listeners.input({target:$('document-search')});
